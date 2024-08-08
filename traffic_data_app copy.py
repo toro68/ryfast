@@ -203,11 +203,10 @@ def process_data_for_years(point_ids, year_list):
         if year in data:
             df[f"{year}"] = data[year]
     df = add_month_names(df)  # Add month names
-    
+
     # Round numeric columns to integers
     numeric_columns = df.select_dtypes(include=[np.number]).columns
     df[numeric_columns] = df[numeric_columns].round(0).astype(int)
-    
     return df
 
 def process_data_for_months(point_ids, year, months):
@@ -232,11 +231,9 @@ def process_data_for_months(point_ids, year, months):
             })
             df = df[df['Month'].isin(months)]
             df = add_month_names(df)
-            
             # Round numeric columns to integers
             numeric_columns = df.select_dtypes(include=[np.number]).columns
             df[numeric_columns] = df[numeric_columns].round(0).astype(int)
-            
             return df
         else:
             st.warning(f"No complete data for all points in year {year}")
@@ -429,4 +426,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-## End of traffic_data_app.py

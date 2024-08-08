@@ -240,7 +240,6 @@ def process_data_for_months(point_ids, year, months):
             st.warning(f"No complete data for all points in year {year}")
             return None
 
-
 def calculate_additional_statistics(df):
     """Calculate additional statistics for the dataset."""
     year_columns = [col for col in df.columns if col not in ["Month", "Month Name"]]
@@ -248,7 +247,6 @@ def calculate_additional_statistics(df):
     for year in year_columns:
         year_data = df[year]
         stats[year] = {
-            "Total Annual Volume": year_data.sum(),
             "Peak Month": df.loc[year_data.idxmax(), "Month Name"],
             "Peak Volume": year_data.max(),
             "Lowest Month": df.loc[year_data.idxmin(), "Month Name"],
@@ -257,7 +255,6 @@ def calculate_additional_statistics(df):
             "Coefficient of Variation": year_data.std() / year_data.mean() * 100,  # as percentage
         }
     return pd.DataFrame(stats).T
-
 
 def add_month_names(df):
     """
