@@ -421,6 +421,30 @@ def main():
             st.error(f"An unexpected error occurred: {str(e)}")
             logger.exception("An unexpected error occurred")
 
+    # Add historical timeline
+    st.subheader("Tidslinje for Ryfast")
+    st.markdown("""
+    ### 2019
+    - **30. desember:** Ryfylketunnelen åpnet.
+
+    ### 2020
+    - **22. april:** Hundvågtunnelen og Eiganestunnelen åpnet.
+    - **30. mars:** Planlagt start for bompengeinnkreving.
+    - **Oktober:** Bommen på Bybrua ble snudd.
+
+    ### 2021
+    - **Februar:** Bompengeinnkreving startet. Ryfast var gratis frem til dette tidspunktet.
+
+    ### 2022
+    - **1. juli:** Første takstøkning siden starten av bompengeinnkrevingen.
+
+    ### 2023
+    - **3. mai:** Takstøkning.
+
+    ### 2024
+    - **8. februar:** Takstøkning.
+    - **1. juli:** Takstøkning.
+    """)
 
 if __name__ == "__main__":
     main()
