@@ -6,6 +6,7 @@ import requests
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import io
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -139,6 +140,7 @@ def format_number(x):
 
 def create_pdf(df, statistics, point):
     """Create a PDF report of the traffic data."""
+    buffer = io.BytesIO()
     pdf = FPDF()
     pdf.add_page()
 
@@ -169,7 +171,9 @@ def create_pdf(df, statistics, point):
             ln=True,
         )
 
-    return pdf.output(dest="S").encode("latin-1")  # Return PDF as bytes
+    pdf.output(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()  # Return PDF as bytes
 
 
 def process_data_for_years(point_ids, year_list):
