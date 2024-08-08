@@ -1,3 +1,9 @@
+"""
+This module provides functionality for visualizing traffic data using Streamlit.
+It fetches data from the Norwegian Public Roads Administration's Traffic Data API
+and presents it in an interactive web application.
+"""
+
 import calendar
 import logging
 from fpdf import FPDF
@@ -8,7 +14,7 @@ import plotly.express as px
 import streamlit as st
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Define the GraphQL query template
@@ -423,3 +429,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+## End of traffic_data_app.py
