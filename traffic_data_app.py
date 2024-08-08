@@ -138,44 +138,6 @@ def format_number(x):
         return str(x)  # For any other type, convert to string
 
 
-def create_pdf(df, statistics, point):
-    """Create a PDF report of the traffic data."""
-    buffer = io.BytesIO()
-    pdf = FPDF()
-    pdf.add_page()
-
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Traffic Data Visualization", ln=True, align="C")
-    pdf.cell(
-        200,
-        10,
-        txt=f"Summed monthly average daily traffic volume for {point}",
-        ln=True,
-        align="C",
-    )
-
-    pdf.ln(10)
-    pdf.cell(200, 10, txt="Data:", ln=True)
-    for col in df.columns:
-        pdf.cell(
-            200, 10, txt=f"{col}: {', '.join(df[col].astype(str).tolist())}", ln=True
-        )
-
-    pdf.ln(10)
-    pdf.cell(200, 10, txt="Statistics:", ln=True)
-    for col in statistics.columns:
-        pdf.cell(
-            200,
-            10,
-            txt=f"{col}: {', '.join(statistics[col].astype(str).tolist())}",
-            ln=True,
-        )
-
-    pdf.output(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()  # Return PDF as bytes
-
-
 def process_data_for_years(point_ids, year_list):
     """
     Process data for multiple years.
@@ -240,6 +202,7 @@ def process_data_for_months(point_ids, year, months):
             st.warning(f"No complete data for all points in year {year}")
             return None
 
+
 def calculate_additional_statistics(df):
     """Calculate additional statistics for the dataset."""
     year_columns = [col for col in df.columns if col not in ["Month", "Month Name"]]
@@ -255,6 +218,7 @@ def calculate_additional_statistics(df):
             "Coefficient of Variation": year_data.std() / year_data.mean() * 100,  # as percentage
         }
     return pd.DataFrame(stats).T
+
 
 def add_month_names(df):
     """
@@ -398,17 +362,6 @@ def main():
             additional_stats = calculate_additional_statistics(df)
             st.write(additional_stats.map(format_number))
 
-            pdf_bytes = create_pdf(
-                formatted_df, statistics.applymap(format_number), point
-            )
-            st.download_button(
-                label="Download PDF Report",
-                data=pdf_bytes,
-                file_name="traffic_data_report.pdf",
-                mime="application/pdf",
-                key=f"download_button_{point}",
-            )
-
         except requests.RequestException as e:
             st.error(f"Error fetching data: {str(e)}")
             logger.exception("Error occurred while fetching data")
@@ -444,6 +397,19 @@ def main():
     ### 2024
     - **8. februar:** Takstøkning.
     - **1. juli:** Takstøkning.
+    """)
+
+    # Add explanations for statistical terms
+    st.subheader("Forklaringer for statistikktermene")
+    st.markdown("""
+    - **count**: Antall ikke-NA/NaN (ikke-null) observasjoner.
+    - **mean**: Gjennomsnittlig verdi av dataene.
+    - **std**: Standardavvik, som måler spredningen i dataene.
+    - **min**: Minimumsverdien i dataene.
+    - **25%**: Første kvartil, verdien under hvilken 25% av dataene faller.
+    - **50%**: Median, verdien som deler datasettet i to like store deler.
+    - **75%**: Tredje kvartil, verdien under hvilken 75% av dataene faller.
+    - **max**: Maksimumsverdien i dataene.
     """)
 
 if __name__ == "__main__":

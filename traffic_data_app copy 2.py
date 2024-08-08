@@ -1,9 +1,3 @@
-"""
-This module provides functionality for visualizing traffic data using Streamlit.
-It fetches data from the Norwegian Public Roads Administration's Traffic Data API
-and presents it in an interactive web application.
-"""
-
 import calendar
 import logging
 from fpdf import FPDF
@@ -12,9 +6,10 @@ import requests
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import io
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Define the GraphQL query template
@@ -145,6 +140,7 @@ def format_number(x):
 
 def create_pdf(df, statistics, point):
     """Create a PDF report of the traffic data."""
+    buffer = io.BytesIO()
     pdf = FPDF()
     pdf.add_page()
 
@@ -175,7 +171,9 @@ def create_pdf(df, statistics, point):
             ln=True,
         )
 
-    return pdf.output(dest="S").encode("latin-1")  # Return PDF as bytes
+    pdf.output(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()  # Return PDF as bytes
 
 
 def process_data_for_years(point_ids, year_list):
@@ -203,10 +201,11 @@ def process_data_for_years(point_ids, year_list):
         if year in data:
             df[f"{year}"] = data[year]
     df = add_month_names(df)  # Add month names
-
+    
     # Round numeric columns to integers
     numeric_columns = df.select_dtypes(include=[np.number]).columns
     df[numeric_columns] = df[numeric_columns].round(0).astype(int)
+    
     return df
 
 def process_data_for_months(point_ids, year, months):
@@ -231,14 +230,15 @@ def process_data_for_months(point_ids, year, months):
             })
             df = df[df['Month'].isin(months)]
             df = add_month_names(df)
+            
             # Round numeric columns to integers
             numeric_columns = df.select_dtypes(include=[np.number]).columns
             df[numeric_columns] = df[numeric_columns].round(0).astype(int)
+            
             return df
         else:
             st.warning(f"No complete data for all points in year {year}")
             return None
-
 
 def calculate_additional_statistics(df):
     """Calculate additional statistics for the dataset."""
@@ -247,7 +247,6 @@ def calculate_additional_statistics(df):
     for year in year_columns:
         year_data = df[year]
         stats[year] = {
-            "Total Annual Volume": year_data.sum(),
             "Peak Month": df.loc[year_data.idxmax(), "Month Name"],
             "Peak Volume": year_data.max(),
             "Lowest Month": df.loc[year_data.idxmin(), "Month Name"],
@@ -256,7 +255,6 @@ def calculate_additional_statistics(df):
             "Coefficient of Variation": year_data.std() / year_data.mean() * 100,  # as percentage
         }
     return pd.DataFrame(stats).T
-
 
 def add_month_names(df):
     """
@@ -423,6 +421,30 @@ def main():
             st.error(f"An unexpected error occurred: {str(e)}")
             logger.exception("An unexpected error occurred")
 
+    # Add historical timeline
+    st.subheader("Tidslinje for Ryfast")
+    st.markdown("""
+    ### 2019
+    - **30. desember:** Ryfylketunnelen åpnet.
+
+    ### 2020
+    - **22. april:** Hundvågtunnelen og Eiganestunnelen åpnet.
+    - **30. mars:** Planlagt start for bompengeinnkreving.
+    - **Oktober:** Bommen på Bybrua ble snudd.
+
+    ### 2021
+    - **Februar:** Bompengeinnkreving startet. Ryfast var gratis frem til dette tidspunktet.
+
+    ### 2022
+    - **1. juli:** Første takstøkning siden starten av bompengeinnkrevingen.
+
+    ### 2023
+    - **3. mai:** Takstøkning.
+
+    ### 2024
+    - **8. februar:** Takstøkning.
+    - **1. juli:** Takstøkning.
+    """)
 
 if __name__ == "__main__":
     main()
