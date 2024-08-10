@@ -78,6 +78,8 @@ def fetch_and_process_data(point_ids, year):
             processed_data = process_traffic_data(traffic_data)
             if processed_data is not None:
                 processed_data["Point ID"] = point_id
+                # Tilføy "Month" her:
+                processed_data["Month"] = processed_data["month"]  
                 data.append(processed_data)
     if data:
         return pd.concat(data)
@@ -87,6 +89,8 @@ def fetch_and_process_data(point_ids, year):
 def create_visualization(df, point, year, comparison_mode):
     """Create visualization based on the data and comparison mode."""
     if comparison_mode == "Compare Years":
+        # Tilføy "Month" her:
+        df["Month"] = df["month"]
         df_melted = df.melt(id_vars=["Month", "Point ID"], var_name="Year", value_name="Volume")
         fig = px.bar(
             df_melted,
@@ -147,9 +151,10 @@ def main():
                 df = pd.DataFrame()
                 for year in year_list:
                     df_year = fetch_and_process_data(point_ids, year)
-                    if df_year is not None:
-                        df_year["Year"] = year
-                        df = pd.concat([df, df_year])
+                        if df_year is not None:
+                            df_year = df_year.rename(columns={"month": "Month"}) # Endrer navnet her
+                            df_year["Year"] = year
+                            df = pd.concat([df, df_year])
                 if not df.empty:
                     df = add_month_names(df)
                     fig = create_visualization(df, point, year, comparison_mode)
