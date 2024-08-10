@@ -49,255 +49,67 @@ BYBRUA_POINT_IDS = ["17949V320695"]
 # Define the API endpoint
 URL = "https://trafikkdata-api.atlas.vegvesen.no"
 
-
-def fetch_data(query):
-    """Fetch data from the API using the provided GraphQL query."""
+def fetch_traffic_data(point_id, year):
+    """Fetch traffic data for a given point ID and year."""
+    query = QUERY_TEMPLATE.format(point_id=point_id, year=year)
     try:
         response = requests.post(URL, json={"query": query}, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
-        logger.error("API request failed: %s", str(e))
+        logger.error(f"API request failed for point ID {point_id} in year {year}: {str(e)}")
         return None
 
-
-def fetch_traffic_data(point_ids, year):
-    """Fetch traffic data for given point IDs and year."""
-    data_per_point = {}
-    for point_id in point_ids:
-        query = QUERY_TEMPLATE.format(point_id=point_id, year=year)
-        data = fetch_data(query)
-        if data and "data" in data:
-            monthly_data = data["data"]["trafficData"]["volume"]["average"]["daily"][
-                "byMonth"
-            ]
-            if monthly_data:
-                data_per_point[point_id] = monthly_data
-            else:
-                logger.warning(
-                    "No monthly data for point ID %s in year %s", point_id, year
-                )
-        else:
-            logger.warning(
-                "Failed to fetch data for point ID %s in year %s", point_id, year
-            )
-    return data_per_point
-
-
-def sum_traffic_data(traffic_data_dict):
-    """Sum traffic data from multiple points."""
-    monthly_sums = [0] * 12
-    for point_data in traffic_data_dict.values():
-        for entry in point_data:
-            month = entry["month"]
-            volume = entry["total"]["volume"]["average"]
-            monthly_sums[month - 1] += volume
-    return monthly_sums
-
-
-def process_data_for_points(point_ids, year_list):
-    """Process data for given point IDs and years."""
-    data = {}
-    for year in year_list:
-        with st.spinner(f"Fetching data for {year}..."):
-            traffic_data_dict = fetch_traffic_data(point_ids, year)
-            if traffic_data_dict:
-                data[year] = sum_traffic_data(traffic_data_dict)
-            else:
-                st.warning(f"No complete data for all points in year {year}")
-
-    months = list(range(1, 13))
-    df = pd.DataFrame({"Month": months})
-    for year in year_list:
-        if year in data:
-            df[f"Volume for {year}"] = data[year]
-
-    df = df.round(0).astype(int)
-    return df
-
-
-def format_number(x):
-    """
-    Format number with thousands separator.
-
-    Args:
-    x: The value to format (can be a number or a string)
-
-    Returns:
-    str: Formatted string with space as thousands separator
-    """
-    if isinstance(x, (int, float)):
-        return f"{x:,}".replace(",", " ")
-    elif isinstance(x, str):
-        try:
-            num = float(x)
-            return f"{num:,}".replace(",", " ")
-        except ValueError:
-            return x  # Return the original string if it can't be converted to a number
+def process_traffic_data(traffic_data_dict):
+    """Process the traffic data dictionary."""
+    monthly_data = traffic_data_dict["data"]["trafficData"]["volume"]["average"]["daily"]["byMonth"]
+    if monthly_data:
+        return pd.DataFrame(monthly_data)
     else:
-        return str(x)  # For any other type, convert to string
+        logger.warning("No monthly data found for the given point ID and year.")
+        return None
 
+def fetch_and_process_data(point_ids, year):
+    """Fetch and process data for multiple point IDs."""
+    data = []
+    for point_id in point_ids:
+        traffic_data = fetch_traffic_data(point_id, year)
+        if traffic_data:
+            processed_data = process_traffic_data(traffic_data)
+            if processed_data is not None:
+                processed_data["Point ID"] = point_id
+                data.append(processed_data)
+    if data:
+        return pd.concat(data)
+    else:
+        return None
 
-def process_data_for_years(point_ids, year_list):
-    """
-    Process data for multiple years.
-    
-    Args:
-    point_ids (list): List of traffic registration point IDs.
-    year_list (list): List of years to process.
-    
-    Returns:
-    pandas.DataFrame: Processed data for the specified years.
-    """
-    data = {}
-    for year in year_list:
-        with st.spinner(f"Fetching data for {year}..."):
-            traffic_data_dict = fetch_traffic_data(point_ids, year)
-            if traffic_data_dict:
-                data[year] = sum_traffic_data(traffic_data_dict)
-            else:
-                st.warning(f"No complete data for all points in year {year}")
-
-    df = pd.DataFrame({"Month": list(range(1, 13))})
-    for year in year_list:
-        if year in data:
-            df[f"{year}"] = data[year]
-    df = add_month_names(df)  # Add month names
-    
-    # Round numeric columns to integers
-    numeric_columns = df.select_dtypes(include=[np.number]).columns
-    df[numeric_columns] = df[numeric_columns].round(0).astype(int)
-    
-    return df
-
-def process_data_for_months(point_ids, year, months):
-    """
-    Process data for selected months of a year.
-    
-    Args:
-    point_ids (list): List of traffic registration point IDs.
-    year (int): Year to process.
-    months (list): List of months to process.
-    
-    Returns:
-    pandas.DataFrame: Processed data for the specified months.
-    """
-    with st.spinner(f"Fetching data for {year}..."):
-        traffic_data_dict = fetch_traffic_data(point_ids, year)
-        if traffic_data_dict:
-            data = sum_traffic_data(traffic_data_dict)
-            df = pd.DataFrame({
-                "Month": list(range(1, 13)),
-                f"{year}": data
-            })
-            df = df[df['Month'].isin(months)]
-            df = add_month_names(df)
-            
-            # Round numeric columns to integers
-            numeric_columns = df.select_dtypes(include=[np.number]).columns
-            df[numeric_columns] = df[numeric_columns].round(0).astype(int)
-            
-            return df
-        else:
-            st.warning(f"No complete data for all points in year {year}")
-            return None
-
-
-def calculate_additional_statistics(df):
-    """Calculate additional statistics for the dataset."""
-    year_columns = [col for col in df.columns if col not in ["Month", "Month Name"]]
-    stats = {}
-    for year in year_columns:
-        year_data = df[year]
-        stats[year] = {
-            "Peak Month": df.loc[year_data.idxmax(), "Month Name"],
-            "Peak Volume": year_data.max(),
-            "Lowest Month": df.loc[year_data.idxmin(), "Month Name"],
-            "Lowest Volume": year_data.min(),
-            "Volume Range": year_data.max() - year_data.min(),
-            "Coefficient of Variation": year_data.std() / year_data.mean() * 100,  # as percentage
-        }
-    return pd.DataFrame(stats).T
-
-
-def add_month_names(df):
-    """
-    Add month names to the dataframe.
-
-    Args:
-    df (pandas.DataFrame): Input dataframe with 'Month' column.
-
-    Returns:
-    pandas.DataFrame: Dataframe with added 'Month Name' column.
-    """
-    month_names = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ]
-    df["Month Name"] = [month_names[i - 1] for i in df["Month"]]
-    return df[
-        ["Month", "Month Name"]
-        + [col for col in df.columns if col not in ["Month", "Month Name"]]
-    ]
-
-
-def create_year_visualization(df, point):
-    """
-    Create visualization for multiple years.
-
-    Args:
-    df (pandas.DataFrame): Processed traffic data.
-    point (str): Name of the traffic registration point.
-
-    Returns:
-    plotly.graph_objs._figure.Figure: The created visualization.
-    """
-    df_melted = df.melt(
-        id_vars=["Month", "Month Name"], var_name="Year", value_name="Volume"
-    )
-    fig = px.bar(
-        df_melted,
-        x="Month Name",
-        y="Volume",
-        color="Year",
-        barmode="group",
-        title=f"Monthly Traffic Volume for {point} Across Years",
-    )
-    fig.update_xaxes(categoryorder="array", categoryarray=df["Month Name"])
-    return fig
-
-
-def create_month_visualization(df, point, year):
-    """
-    Create visualization for a single year.
-
-    Args:
-    df (pandas.DataFrame): Processed traffic data.
-    point (str): Name of the traffic registration point.
-    year (int): Year of the data.
-
-    Returns:
-    plotly.graph_objs._figure.Figure: The created visualization.
-    """
-    fig = px.bar(
-        df,
-        x="Month Name",
-        y=str(year),
-        title=f"Monthly Traffic Volume for {point} in {year}",
-    )
+def create_visualization(df, point, year, comparison_mode):
+    """Create visualization based on the data and comparison mode."""
+    if comparison_mode == "Compare Years":
+        df_melted = df.melt(id_vars=["Month", "Point ID"], var_name="Year", value_name="Volume")
+        fig = px.bar(
+            df_melted,
+            x="Month",
+            y="Volume",
+            color="Year",
+            barmode="group",
+            title=f"Monthly Traffic Volume for {point} Across Years",
+            facet_col="Point ID",
+            facet_col_wrap=2,
+        )
+        fig.update_xaxes(categoryorder="array", categoryarray=df["Month"])
+    else:  # Compare Months
+        fig = px.bar(
+            df,
+            x="Month",
+            y=str(year),
+            title=f"Monthly Traffic Volume for {point} in {year}",
+            facet_col="Point ID",
+            facet_col_wrap=2,
+        )
     fig.update_layout(xaxis_title="Month", yaxis_title="Traffic Volume", bargap=0.2)
     return fig
-
 
 def main():
     """Main function to run the Streamlit app."""
@@ -328,40 +140,34 @@ def main():
         year_list = [int(year.strip()) for year in year_input.split(",")]
     else:  # Compare Months
         year = st.sidebar.selectbox("Select year", range(2022, 2025))
-        months = st.sidebar.multiselect(
-            "Select months to compare",
-            options=list(range(1, 13)),
-            default=list(range(1, 13)),
-            format_func=lambda x: calendar.month_name[x],
-        )
 
     if st.sidebar.button("Fetch and display data"):
         try:
             if comparison_mode == "Compare Years":
-                df = process_data_for_years(point_ids, year_list)
-                fig = create_year_visualization(df, point)
-            else:
-                df = process_data_for_months(point_ids, year, months)
-                if df is not None:
-                    fig = create_month_visualization(df, point, year)
+                df = pd.DataFrame()
+                for year in year_list:
+                    df_year = fetch_and_process_data(point_ids, year)
+                    if df_year is not None:
+                        df_year["Year"] = year
+                        df = pd.concat([df, df_year])
+                if not df.empty:
+                    df = add_month_names(df)
+                    fig = create_visualization(df, point, year, comparison_mode)
+                    st.subheader(f"Traffic volume for {point}")
+                    st.plotly_chart(fig)
+                    st.dataframe(df)
                 else:
-                    st.error("No data available for the selected options.")
-                    return
-
-            st.subheader(f"Traffic volume for {point}")
-            st.plotly_chart(fig)
-
-            formatted_df = df.map(format_number)
-            st.dataframe(formatted_df)
-
-            st.subheader("Basic Statistics")
-            statistics = df.describe().round(0).astype(int)
-            st.write(statistics.map(format_number))
-
-            st.subheader("Additional Statistics")
-            additional_stats = calculate_additional_statistics(df)
-            st.write(additional_stats.map(format_number))
-
+                    st.warning("No data available for the selected years.")
+            else:  # Compare Months
+                df = fetch_and_process_data(point_ids, year)
+                if df is not None:
+                    df = add_month_names(df)
+                    fig = create_visualization(df, point, year, comparison_mode)
+                    st.subheader(f"Traffic volume for {point} in {year}")
+                    st.plotly_chart(fig)
+                    st.dataframe(df)
+                else:
+                    st.warning(f"No data available for {point} in {year}.")
         except requests.RequestException as e:
             st.error(f"Error fetching data: {str(e)}")
             logger.exception("Error occurred while fetching data")
@@ -369,10 +175,9 @@ def main():
             st.error(f"Error processing data: {str(e)}")
             logger.exception("Error occurred while processing data")
         except Exception as e:
-            # We use a broad exception here to catch any unexpected errors
-            # and provide a user-friendly error message while logging the details.
             st.error(f"An unexpected error occurred: {str(e)}")
             logger.exception("An unexpected error occurred")
+
 
     # Add historical timeline
     st.subheader("Tidslinje for Ryfast")
@@ -411,6 +216,34 @@ def main():
     - **75%**: Tredje kvartil, verdien under hvilken 75% av dataene faller.
     - **max**: Maksimumsverdien i dataene.
     """)
+
+
+def add_month_names(df):
+    """
+    Add month names to the dataframe.
+
+    Args:
+    df (pandas.DataFrame): Input dataframe with 'Month' column.
+
+    Returns:
+    pandas.DataFrame: Dataframe with added 'Month Name' column.
+    """
+    month_names = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+    df["Month Name"] = [month_names[i - 1] for i in df["Month"]]
+    return df
 
 if __name__ == "__main__":
     main()
