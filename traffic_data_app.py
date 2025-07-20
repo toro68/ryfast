@@ -1111,7 +1111,7 @@ def main():
             with tab4:
                 st.subheader("💰 Bompengeanalyse")
                 
-                if comparison_mode == "Sammenlign år" and 2024 in [int(y) for y in year_list if y.isdigit()] and point in ["Ryfylketunnelen", "Hundvågtunnelen"]:
+                if comparison_mode == "Sammenlign år" and 2024 in year_list and point in ["Ryfylketunnelen", "Hundvågtunnelen"]:
                     exemption_analysis = analyze_toll_exemptions(df, point, 2024)
                     
                     if exemption_analysis:
