@@ -915,15 +915,18 @@ def main():
             st.stop()
             
     elif comparison_mode == "Sammenlign måneder":
-        col1, col2 = st.sidebar.columns(2)
-        with col1:
-            year = st.selectbox("År", list(range(2019, 2026)), index=6, key="year_selector")
-        with col2:
-            quarter = st.selectbox(
-                "Hurtigvalg",
-                ["Alle måneder", "Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Okt-Des)"],
-                key="quarter_selector"
-            )
+        year = st.sidebar.selectbox(
+            "Velg år", 
+            list(range(2019, 2026)), 
+            index=6,  # Default to 2025
+            key="year_selector_months"
+        )
+        
+        quarter = st.sidebar.selectbox(
+            "Hurtigvalg",
+            ["Alle måneder", "Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Okt-Des)"],
+            key="quarter_selector"
+        )
         
         if quarter == "Alle måneder":
             default_months = list(range(1, 13))
@@ -937,24 +940,31 @@ def main():
             default_months = [10, 11, 12]
             
         months = st.sidebar.multiselect(
-            "Velg spesifikke måneder",
+            "Velg måneder",
             options=list(range(1, 13)),
             default=default_months,
             format_func=lambda x: NORWEGIAN_MONTH_NAMES[x],
             key="month_selector"
         )
         
+        if not months:
+            st.sidebar.warning("Velg minst én måned")
+            st.stop()
+        
     else:  # Sammenlign uker
-        col1, col2 = st.sidebar.columns(2)
-        with col1:
-            year = st.selectbox("År", list(range(2019, 2026)), index=6, key="year_selector_weeks")
-        with col2:
-            week_range = st.selectbox(
-                "Hurtigvalg",
-                ["Egendefinert", "Første kvartal (1-13)", "Andre kvartal (14-26)", 
-                 "Tredje kvartal (27-39)", "Fjerde kvartal (40-52)"],
-                key="week_range_selector"
-            )
+        year = st.sidebar.selectbox(
+            "Velg år", 
+            list(range(2019, 2026)), 
+            index=6,  # Default to 2025
+            key="year_selector_weeks"
+        )
+        
+        week_range = st.sidebar.selectbox(
+            "Hurtigvalg",
+            ["Egendefinert", "Første kvartal (1-13)", "Andre kvartal (14-26)", 
+             "Tredje kvartal (27-39)", "Fjerde kvartal (40-52)"],
+            key="week_range_selector"
+        )
         
         if week_range == "Første kvartal (1-13)":
             default_weeks = list(range(1, 14))
