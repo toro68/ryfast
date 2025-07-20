@@ -9,8 +9,6 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import json
 from typing import Dict, List, Optional, Tuple
-import asyncio
-import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 import io
 
