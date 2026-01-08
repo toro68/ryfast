@@ -636,7 +636,9 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
     if show_growth:
         growth_df = calculate_growth_rates(df)
         growth_columns = [col for col in growth_df.columns if "Vekst" in col]
-        if growth_columns:
+        if not growth_columns:
+            st.info("Vekstrater krever minst 2 år i samme visning (bruk «Sammenlign år» og velg flere år).")
+        else:
             st.subheader("Vekstrater (år-til-år)")
             if "Month Name" in growth_df.columns:
                 id_vars = ["Month", "Month Name"]
@@ -648,10 +650,26 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
                 id_vars = []
                 x_col = growth_df.index
 
-            growth_melted = growth_df.melt(id_vars=id_vars, value_vars=growth_columns, var_name="Periode", value_name="Vekst (%)")
-            fig_growth = px.bar(growth_melted, x=x_col, y="Vekst (%)", color="Periode", title="År-til-år vekstrater")
-            fig_growth.add_hline(y=0, line_dash="dash", line_color="black")
-            st.plotly_chart(fig_growth, use_container_width=True, key="growth_chart")
+            growth_melted = growth_df.melt(
+                id_vars=id_vars,
+                value_vars=growth_columns,
+                var_name="Periode",
+                value_name="Vekst (%)",
+            )
+            growth_melted["Vekst (%)"] = pd.to_numeric(growth_melted["Vekst (%)"], errors="coerce")
+            growth_melted = growth_melted.dropna(subset=["Vekst (%)"])
+            if growth_melted.empty:
+                st.warning("Fant ingen gyldige vekstrater i datasettet (mangler baseline eller nullverdier).")
+            else:
+                fig_growth = px.bar(
+                    growth_melted,
+                    x=x_col,
+                    y="Vekst (%)",
+                    color="Periode",
+                    title="År-til-år vekstrater",
+                )
+                fig_growth.add_hline(y=0, line_dash="dash", line_color="black")
+                st.plotly_chart(fig_growth, use_container_width=True, key="growth_chart")
 
 
 def process_data_for_years(point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool) -> pd.DataFrame:
