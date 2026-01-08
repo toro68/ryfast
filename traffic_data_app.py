@@ -55,6 +55,11 @@ TRAFFIC_POINTS = {
     }
 }
 
+HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE = [
+    "10239V2725979",
+    "92743V2726085",
+]
+
 # Month Names
 MONTH_NAMES = [
     "Januar", "Februar", "Mars", "April", "Mai", "Juni",
@@ -345,6 +350,102 @@ def format_number(x):
 
 def days_in_year(year: int) -> int:
     return 366 if calendar.isleap(year) else 365
+
+def monthly_totals_from_monthly_averages(df: pd.DataFrame, year: int) -> pd.Series:
+    """
+    Konverterer månedsvis gjennomsnittlig døgntrafikk (ÅDT) til totale passeringer per måned.
+    Forutsetter `Month`-kolonne og årskolonne som str (f.eks. "2025").
+    """
+    year_col = str(year)
+    if df is None or df.empty or "Month" not in df.columns or year_col not in df.columns:
+        return pd.Series([pd.NA] * (len(df) if df is not None else 0))
+
+    totals = []
+    for _, row in df.iterrows():
+        try:
+            month = int(row["Month"])
+        except Exception:
+            totals.append(pd.NA)
+            continue
+
+        avg_daily = row.get(year_col, None)
+        if pd.isna(avg_daily) or avg_daily is None or not (1 <= month <= 12):
+            totals.append(pd.NA)
+            continue
+
+        dim = calendar.monthrange(year, month)[1]
+        totals.append(float(avg_daily) * dim)
+
+    return pd.Series(totals)
+
+def compute_monthly_totals_table(df: pd.DataFrame, years: List[int]) -> pd.DataFrame:
+    """Returnerer tabell med totale passeringer per måned for valgte år."""
+    base_cols = [c for c in ["Month", "Month Name"] if c in df.columns]
+    out = df[base_cols].copy()
+    for y in years:
+        out[str(y)] = monthly_totals_from_monthly_averages(df, y)
+    numeric_columns = out.select_dtypes(include=[np.number]).columns
+    out[numeric_columns] = out[numeric_columns].round(0).astype("Int64")
+    return out
+
+def aggregate_monthly_totals_by_group(
+    traffic_data_by_point: Dict[str, List[Dict]],
+    point_ids_by_group: Dict[str, List[str]],
+    year: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Lager månedstabell for totalsummer per gruppe, basert på rå per-punkt API-data.
+    Returnerer (totals_df, coverage_df) med kolonner: Month, Month Name, <group...>
+    coverage_df er snittdekning (%) per måned per gruppe.
+    """
+    point_to_group = {}
+    for group, ids in point_ids_by_group.items():
+        for pid in ids:
+            point_to_group[pid] = group
+
+    groups = list(point_ids_by_group.keys())
+    totals = {g: {m: 0.0 for m in range(1, 13)} for g in groups}
+    cov_lists: Dict[str, Dict[int, List[float]]] = {g: {m: [] for m in range(1, 13)} for g in groups}
+
+    for pid, entries in traffic_data_by_point.items():
+        group = point_to_group.get(pid)
+        if not group:
+            continue
+
+        for entry in entries or []:
+            month = int(entry.get("month", 0) or 0)
+            if not (1 <= month <= 12):
+                continue
+            try:
+                avg_daily = entry["total"]["volume"]["average"]
+            except Exception:
+                avg_daily = None
+            if avg_daily is None:
+                continue
+            dim = calendar.monthrange(year, month)[1]
+            totals[group][month] += float(avg_daily) * dim
+
+            try:
+                cov = entry["total"]["coverage"]["percentage"]
+            except Exception:
+                cov = None
+            if cov is not None:
+                cov_lists[group][month].append(float(cov))
+
+    totals_df = pd.DataFrame({"Month": list(range(1, 13))})
+    for g in groups:
+        totals_df[g] = [totals[g][m] for m in range(1, 13)]
+    totals_df = add_month_names(totals_df)
+    totals_df[groups] = totals_df[groups].round(0).astype("Int64")
+
+    coverage_df = pd.DataFrame({"Month": list(range(1, 13))})
+    for g in groups:
+        coverage_df[g] = [
+            (sum(cov_lists[g][m]) / len(cov_lists[g][m])) if cov_lists[g][m] else np.nan
+            for m in range(1, 13)
+        ]
+    coverage_df = add_month_names(coverage_df)
+    return totals_df, coverage_df
 
 def calculate_yearly_total_from_monthly_averages(df: pd.DataFrame, year: int) -> Tuple[float, int, int]:
     """
@@ -871,7 +972,21 @@ def main():
         api_timeout = st.slider("API timeout (sekunder)", 10, 60, API_TIMEOUT)
 
     # Handle point IDs based on selection
-    if point == "Ryfylketunnelen":
+    if point == "Ryfast (sum tunneler)":
+        include_ramp = st.sidebar.checkbox(
+            "Inkluder pårampe i Hundvågtunnelen",
+            value=True,
+            key="ryfast_include_ramp",
+            help="Når av, summeres kun hovedløpene (uten pårampe) for Hundvågtunnelen.",
+        )
+        ryfylke_ids = TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
+        hundvag_ids = (
+            TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
+            if include_ramp
+            else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
+        )
+        point_ids = ryfylke_ids + hundvag_ids
+    elif point == "Ryfylketunnelen":
         point_ids = TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
     elif point == "Hundvågtunnelen":
         point_ids = TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
@@ -881,10 +996,12 @@ def main():
             ["Begge retninger", "Mot nord", "Mot sør"],
             key="direction_selector"
         )
-        
+
         if direction == "Begge retninger":
-            point_ids = (TRAFFIC_POINTS["Bybrua"]["ids"]["Mot nord"] + 
-                        TRAFFIC_POINTS["Bybrua"]["ids"]["Mot sør"])
+            point_ids = (
+                TRAFFIC_POINTS["Bybrua"]["ids"]["Mot nord"]
+                + TRAFFIC_POINTS["Bybrua"]["ids"]["Mot sør"]
+            )
         else:
             point_ids = TRAFFIC_POINTS["Bybrua"]["ids"][direction]
 
@@ -1013,8 +1130,8 @@ def main():
                     st.stop()
 
             # Create tabs for different views
-            tab1, tab2, tab3, tab4 = st.tabs([
-                "📈 Visualisering", "📊 Data", "📋 Statistikk", "📄 Rapport"
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "📈 Visualisering", "📊 Data", "🧮 Totaltall", "📋 Statistikk", "📄 Rapport"
             ])
 
             with tab1:
@@ -1095,6 +1212,131 @@ def main():
                                 )
 
             with tab3:
+                st.subheader("🧮 Totale passeringer (samlet trafikk)")
+
+                if comparison_mode == "Sammenlign uker":
+                    st.info(
+                        "Ukesvisning viser per nå gjennomsnitt per døgn (sum av punkter). "
+                        "Totale uketall krever at vi vet hvor mange gyldige dager som inngår i snittet."
+                    )
+                else:
+                    years_for_totals = year_list if comparison_mode == "Sammenlign år" else [year]
+                    totals_df = compute_monthly_totals_table(df, years_for_totals)
+
+                    st.caption(
+                        "Beregning: (månedsvis gjennomsnitt per døgn) × (antall dager i måneden), summert per måned."
+                    )
+
+                # Summary metrics for latest year
+                    year_cols = [y for y in years_for_totals if str(y) in totals_df.columns]
+                    if year_cols:
+                        latest_year = max(year_cols)
+                        total, months_present, days_covered = calculate_yearly_total_from_monthly_averages(df, int(latest_year))
+                        avg_per_day = (total / days_covered) if days_covered else None
+                        full_year_estimate = (avg_per_day * days_in_year(int(latest_year))) if avg_per_day is not None else None
+
+                        m1, m2, m3 = st.columns(3)
+                        with m1:
+                            st.metric(
+                                f"Totalt {latest_year} ({'hittil' if months_present < 12 else 'helår'})",
+                                format_number(total),
+                                help="Totalt antall passeringer beregnet fra Vegvesen sine måneds-ÅDT.",
+                            )
+                        with m2:
+                            st.metric(
+                                "Snitt per døgn (basert på tilgjengelige måneder)",
+                                format_number(avg_per_day) if avg_per_day is not None else "N/A",
+                            )
+                        with m3:
+                            if months_present < 12 and full_year_estimate is not None:
+                                st.metric("Estimert helår", format_number(full_year_estimate))
+                            else:
+                                st.metric("Måneder med data", f"{months_present}/12")
+
+                        if comparison_mode == "Sammenlign år" and len(year_cols) >= 2:
+                            prev_year = sorted(year_cols)[-2]
+                            prev_total, _, _ = calculate_yearly_total_from_monthly_averages(df, int(prev_year))
+                            if prev_total:
+                                st.metric(
+                                    f"Endring vs {prev_year}",
+                                    f"{((total - prev_total) / prev_total * 100):+.1f}%",
+                                )
+
+                # Plot totals by month/year
+                    melt_cols = [str(y) for y in years_for_totals if str(y) in totals_df.columns]
+                    if melt_cols:
+                        melted = totals_df.melt(
+                            id_vars=[c for c in ["Month", "Month Name"] if c in totals_df.columns],
+                            value_vars=melt_cols,
+                            var_name="År",
+                            value_name="Passeringer",
+                        )
+                        fig_totals = px.bar(
+                            melted,
+                            x="Month Name" if "Month Name" in melted.columns else "Month",
+                            y="Passeringer",
+                            color="År",
+                            barmode="group",
+                            title="Totale passeringer per måned",
+                        )
+                        fig_totals.update_yaxes(tickformat=",")
+                        st.plotly_chart(fig_totals, use_container_width=True)
+
+                # Extra: breakdown when summing both tunnels
+                    if point == "Ryfast (sum tunneler)":
+                        with st.expander("🔎 Fordeling mellom tunneler (Ryfylketunnelen vs Hundvågtunnelen)"):
+                            breakdown_year = st.selectbox(
+                                "Velg år for fordeling",
+                                options=years_for_totals,
+                                index=len(years_for_totals) - 1,
+                                key="ryfast_breakdown_year",
+                            )
+                            traffic_by_point = fetch_batch_traffic_data(point_ids, int(breakdown_year))
+                            point_ids_by_group = {
+                                "Ryfylketunnelen": TRAFFIC_POINTS["Ryfylketunnelen"]["ids"],
+                                "Hundvågtunnelen": (
+                                    TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
+                                    if st.session_state.get("ryfast_include_ramp", True)
+                                    else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
+                                ),
+                            }
+
+                            totals_by_group_df, coverage_by_group_df = aggregate_monthly_totals_by_group(
+                                traffic_by_point, point_ids_by_group, int(breakdown_year)
+                            )
+
+                            melted_groups = totals_by_group_df.melt(
+                                id_vars=["Month", "Month Name"],
+                                value_vars=list(point_ids_by_group.keys()),
+                                var_name="Tunnel",
+                                value_name="Passeringer",
+                            )
+                            fig_stack = px.bar(
+                                melted_groups,
+                                x="Month Name",
+                                y="Passeringer",
+                                color="Tunnel",
+                                title=f"Samlet trafikk {breakdown_year} (stacked per tunnel)",
+                            )
+                            fig_stack.update_yaxes(tickformat=",")
+                            st.plotly_chart(fig_stack, use_container_width=True)
+
+                            st.caption("Dekning (%) er snitt av rapportert dekning på målepunktene per måned.")
+                            st.dataframe(
+                                coverage_by_group_df.round(1),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                # Show totals table
+                    with st.expander("📋 Totaltabell"):
+                        formatted_totals = totals_df.copy()
+                        numeric_cols = formatted_totals.select_dtypes(include=[np.number]).columns
+                        for col in numeric_cols:
+                            formatted_totals[col] = formatted_totals[col].map(format_number)
+                        st.dataframe(formatted_totals, use_container_width=True, hide_index=True)
+
+            with tab4:
                 st.subheader("📋 Detaljert statistikk")
                 
                 # Basic statistics
@@ -1111,7 +1353,7 @@ def main():
                 advanced_stats = calculate_additional_statistics(df)
                 st.dataframe(advanced_stats.map(format_number), use_container_width=True)
 
-            with tab4:
+            with tab5:
                 st.subheader("📄 Automatisk rapport")
                 
                 report_text = create_comparison_report(df, point)
