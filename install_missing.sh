@@ -32,4 +32,4 @@ python -m pip list | grep -E "(openpyxl|watchdog|fpdf2|streamlit)" || true
 echo "🎯 Test import av openpyxl..."
 python -c "import openpyxl; print('✅ openpyxl importerer OK')"
 
-echo "🚀 Nå kan du kjøre: streamlit run traffic_data_app.py"
+echo "🚀 Nå kan du kjøre: streamlit run ryfast_app/app.py"

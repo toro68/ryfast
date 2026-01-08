@@ -10,7 +10,7 @@ Små verktøy og en Streamlit-app for å hente og visualisere trafikkdata (State
 2. Installer avhengigheter:
    - `python -m pip install -r requirements.txt`
 3. Kjør appen:
-   - `streamlit run traffic_data_app.py`
+   - `streamlit run ryfast_app/app.py`
 
 ## Hjelpeskript
 

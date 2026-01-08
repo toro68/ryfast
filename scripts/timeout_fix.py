@@ -1,5 +1,5 @@
 # QUICK FIX: Øk timeouts og legg til bedre feilhåndtering
-# Legg til denne koden øverst i traffic_data_app.py etter imports
+# Legg til denne koden øverst i ryfast_app/app.py etter imports
 
 # Økt timeout og bedre feilhåndtering
 API_TIMEOUT = 60  # Økt fra 15 til 60 sekunder
@@ -161,7 +161,7 @@ def fetch_weekly_traffic_data_debug(point_ids: List[str], year: int, week_number
 print("""
 🔧 IMPLEMENTER DENNE LØSNINGEN:
 
-1. Åpne traffic_data_app.py
+1. Åpne ryfast_app/app.py
 2. Finn linjen: API_TIMEOUT = 15
 3. Endre til: API_TIMEOUT = 60
 4. Finn linjen: API_MAX_RETRIES = 3  

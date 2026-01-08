@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-- `traffic_data_app.py`: Streamlit app for fetching and visualizing traffic data from Statens vegvesen (GraphQL).
+- `ryfast_app/app.py`: Streamlit app for fetching and visualizing traffic data from Statens vegvesen (GraphQL).
 - `compare_vegvesen_ferde.py`: CLI tool for comparing Vegvesen counts with Ferde data (reads Excel in `docs/` and writes CSV).
 - `scripts/debug_api.py`: Small script for troubleshooting API connectivity/response time.
 - `docs/`: Input/output artifacts (e.g. `*.xlsx`, exported `*.csv`, markdown analyses).
@@ -12,7 +12,7 @@
 ## Build, Test, and Development Commands
 
 - Install deps: `python -m pip install -r requirements.txt`
-- Run Streamlit app: `streamlit run traffic_data_app.py`
+- Run Streamlit app: `streamlit run ryfast_app/app.py`
 - Compare datasets: `python compare_vegvesen_ferde.py --help`
 - Debug API: `python scripts/debug_api.py`
 - Quick syntax check (CI-style sanity): `python -m compileall -q .`
@@ -31,7 +31,7 @@ Notes:
 
 - No dedicated test suite currently.
 - Before opening a PR, run `python -m compileall -q .` and (when relevant) manually smoke-test:
-  - `streamlit run traffic_data_app.py` for UI changes
+- `streamlit run ryfast_app/app.py` for UI changes
   - `python compare_vegvesen_ferde.py --years 2024,2025` for comparison changes
 
 ## Commit & Pull Request Guidelines

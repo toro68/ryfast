@@ -1,0 +1,1 @@
+"""Ryfast Streamlit app package."""
