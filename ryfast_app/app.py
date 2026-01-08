@@ -505,31 +505,45 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
     if chart_type == "heatmap":
         year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
         if len(year_columns) > 1 and "Month Name" in df.columns:
-            heatmap_data = df[year_columns].apply(pd.to_numeric, errors="coerce").T
-            fig = go.Figure(
-                data=go.Heatmap(
-                    z=heatmap_data.values,
-                    x=df["Month Name"],
-                    y=[str(y) for y in year_columns],
-                    colorscale="RdYlBu_r",
-                    hoverongaps=False,
-                )
+            heatmap_data = df[["Month Name"] + year_columns].set_index("Month Name")
+            heatmap_data = heatmap_data.apply(pd.to_numeric, errors="coerce")
+            fig = px.imshow(
+                heatmap_data.T,
+                aspect="auto",
+                color_continuous_scale="RdYlBu_r",
+                labels=dict(x="Måned", y="År", color="Trafikk"),
+                title=f"Sesongmønster for {point}",
             )
-            fig.update_layout(title=f"Sesongmønster for {point}", xaxis_title="Måned", yaxis_title="År")
+            fig.update_layout(coloraxis_colorbar=dict(title="Trafikk"))
             return fig
         return create_advanced_visualization(df, point, "line")
 
     if chart_type == "box":
         year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
-        fig = go.Figure()
-        for year in year_columns:
-            y = pd.to_numeric(df[year], errors="coerce").dropna()
-            if y.empty:
-                continue
-            fig.add_trace(go.Box(y=y, name=str(year), boxpoints="all", jitter=0.3, pointpos=-1.8))
-        if not fig.data:
+        if not year_columns:
             return create_advanced_visualization(df, point, "line")
-        fig.update_layout(title=f"Trafikkfordeling for {point}", yaxis_title="Gjennomsnittlig døgntrafikk", xaxis_title="År")
+
+        if "Month Name" in df.columns:
+            id_vars = ["Month", "Month Name"]
+        elif "Week" in df.columns:
+            id_vars = ["Week"]
+        else:
+            id_vars = []
+
+        melted = df.melt(id_vars=id_vars, value_vars=year_columns, var_name="År", value_name="Trafikk")
+        melted["Trafikk"] = pd.to_numeric(melted["Trafikk"], errors="coerce")
+        melted = melted.dropna(subset=["Trafikk"])
+        if melted.empty:
+            return create_advanced_visualization(df, point, "line")
+
+        fig = px.box(
+            melted,
+            x="År",
+            y="Trafikk",
+            points="all",
+            title=f"Trafikkfordeling for {point}",
+            labels={"Trafikk": "Gjennomsnittlig døgntrafikk"},
+        )
         return fig
 
     # Default line chart
@@ -571,6 +585,7 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
         chart_type = st.selectbox(
             "Velg diagramtype",
             chart_options,
+            key="chart_type_selector",
             format_func=lambda x: {
                 "line": "Linjediagram",
                 "heatmap": "Varmekart",
