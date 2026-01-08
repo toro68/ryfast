@@ -477,6 +477,8 @@ def create_export_section(df: pd.DataFrame, point: str):
 
 
 def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str) -> go.Figure:
+    template = "plotly_white"
+
     if chart_type == "line_with_confidence":
         fig = go.Figure()
         year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
@@ -499,22 +501,35 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
             yaxis_title="Gjennomsnittlig døgntrafikk",
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            template=template,
         )
         return fig
 
     if chart_type == "heatmap":
         year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
         if len(year_columns) > 1 and "Month Name" in df.columns:
-            heatmap_data = df[["Month Name"] + year_columns].set_index("Month Name")
-            heatmap_data = heatmap_data.apply(pd.to_numeric, errors="coerce").astype(float)
-            fig = px.imshow(
-                heatmap_data.T,
-                aspect="auto",
-                color_continuous_scale="RdYlBu_r",
-                labels=dict(x="Måned", y="År", color="Trafikk"),
-                title=f"Sesongmønster for {point}",
+            table = df[["Month Name"] + year_columns].copy()
+            z = table[year_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float).T
+            x = table["Month Name"].tolist()
+            y = [str(c) for c in year_columns]
+
+            fig = go.Figure(
+                data=go.Heatmap(
+                    z=z,
+                    x=x,
+                    y=y,
+                    colorscale="RdYlBu_r",
+                    colorbar=dict(title="Trafikk"),
+                    hoverongaps=False,
+                )
             )
-            fig.update_layout(coloraxis_colorbar=dict(title="Trafikk"))
+            fig.update_layout(
+                title=f"Sesongmønster for {point}",
+                xaxis_title="Måned",
+                yaxis_title="År",
+                template=template,
+                height=520,
+            )
             return fig
         return create_advanced_visualization(df, point, "line")
 
@@ -523,26 +538,31 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
         if not year_columns:
             return create_advanced_visualization(df, point, "line")
 
-        if "Month Name" in df.columns:
-            id_vars = ["Month", "Month Name"]
-        elif "Week" in df.columns:
-            id_vars = ["Week"]
-        else:
-            id_vars = []
-
-        melted = df.melt(id_vars=id_vars, value_vars=year_columns, var_name="År", value_name="Trafikk")
-        melted["Trafikk"] = pd.to_numeric(melted["Trafikk"], errors="coerce").astype(float)
-        melted = melted.dropna(subset=["Trafikk"])
-        if melted.empty:
+        fig = go.Figure()
+        colors = px.colors.qualitative.Set1
+        for i, year in enumerate(year_columns):
+            yvals = pd.to_numeric(df[year], errors="coerce").to_numpy(dtype=float)
+            yvals = [v for v in yvals.tolist() if v == v]  # filter NaN
+            if not yvals:
+                continue
+            fig.add_trace(
+                go.Box(
+                    y=yvals,
+                    name=str(year),
+                    boxpoints="all",
+                    jitter=0.25,
+                    marker=dict(color=colors[i % len(colors)], size=4, opacity=0.6),
+                    line=dict(color=colors[i % len(colors)], width=2),
+                )
+            )
+        if not fig.data:
             return create_advanced_visualization(df, point, "line")
-
-        fig = px.box(
-            melted,
-            x="År",
-            y="Trafikk",
-            points="all",
+        fig.update_layout(
             title=f"Trafikkfordeling for {point}",
-            labels={"Trafikk": "Gjennomsnittlig døgntrafikk"},
+            yaxis_title="Gjennomsnittlig døgntrafikk",
+            xaxis_title="År",
+            template=template,
+            height=520,
         )
         return fig
 
@@ -565,6 +585,7 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
         title=f"Trafikkutvikling for {point}",
         labels={"Trafikk": "Gjennomsnittlig døgntrafikk", x_col: "Periode"},
     )
+    fig.update_layout(template=template, height=520)
     return fig
 
 
@@ -600,7 +621,17 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
         show_growth = st.checkbox("Vis vekstrater", value=False)
 
     fig = create_advanced_visualization(df, point, chart_type)
-    st.plotly_chart(fig, use_container_width=True, key=f"main_chart_{chart_type}")
+    if not getattr(fig, "data", None):
+        st.warning("Fant ingen plottbare data for valgt diagramtype. Viser linjediagram i stedet.")
+        fig = create_advanced_visualization(df, point, "line")
+        chart_type = "line"
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"main_chart_{chart_type}",
+        config={"displayModeBar": True, "responsive": True},
+    )
 
     if show_growth:
         growth_df = calculate_growth_rates(df)
