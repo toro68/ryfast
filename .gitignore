@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# Local virtualenv (repo currently contains `myenv/`; ignore untracked additions)
+myenv/**/__pycache__/
+myenv/**/*.pyc
+myenv/lib/python*/site-packages/openpyxl/
+myenv/lib/python*/site-packages/openpyxl-*.dist-info/
+myenv/lib/python*/site-packages/et_xmlfile/
+myenv/lib/python*/site-packages/et_xmlfile-*.dist-info/

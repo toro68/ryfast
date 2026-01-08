@@ -8,6 +8,7 @@ import time
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import json
+import calendar
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -24,13 +25,23 @@ URL = "https://trafikkdata-api.atlas.vegvesen.no"
 
 # Traffic Point Constants with descriptions
 TRAFFIC_POINTS = {
+    "Ryfast (sum tunneler)": {
+        "ids": [
+            # Ryfylketunnelen
+            "99040V2725982", "00911V2725983",
+            # Hundvågtunnelen
+            "10239V2725979", "62464V2725991", "92743V2726085", "25926V2725990",
+        ],
+        "description": "Sum av Ryfylketunnelen + Hundvågtunnelen (Ryfast totalt)",
+        "opened": "2019-12-30 / 2020-04-22"
+    },
     "Ryfylketunnelen": {
         "ids": ["99040V2725982", "00911V2725983"],
         "description": "Ryfylketunnelen - hovedforbindelse til Ryfylke",
         "opened": "2019-12-30"
     },
     "Hundvågtunnelen": {
-        "ids": ["10239V2725979", "62464V2725991", "92743V2726085"],
+        "ids": ["10239V2725979", "62464V2725991", "92743V2726085", "25926V2725990"],
         "description": "Hundvågtunnelen - forbindelse til Hundvåg og Eiganes",
         "opened": "2020-04-22"
     },
@@ -129,34 +140,6 @@ query {{
   }}
 }}
 """
-
-# Enhanced Ferde data with more details
-FERDE_DATA_2024 = {
-    "Hundvågtunnelen": {
-        "total_passeringer": {
-            1: 184679, 2: 182709, 3: 199378, 4: 212489, 5: 236726, 
-            6: 240047, 7: 233855, 8: 253300, 9: 226734, 10: 217541,
-            11: 200790, 12: 189330
-        },
-        "fritakspasseringer": {
-            1: 55214, 2: 56004, 3: 63135, 4: 66046, 5: 75436,
-            6: 75886, 7: 75617, 8: 79373, 9: 69799, 10: 67367,
-            11: 61442, 12: 60346
-        }
-    },
-    "Ryfylketunnelen": {
-        "total_passeringer": {
-            1: 131708, 2: 133245, 3: 153886, 4: 158835, 5: 186254,
-            6: 189346, 7: 196522, 8: 202069, 9: 172856, 10: 159849,
-            11: 145479, 12: 136503
-        },
-        "fritakspasseringer": {
-            1: 5360, 2: 4348, 3: 3833, 4: 5604, 5: 4915,
-            6: 5374, 7: 4602, 8: 6224, 9: 5510, 10: 6480,
-            11: 5385, 12: 3896
-        }
-    }
-}
 
 # Norske månedsnavn
 NORWEGIAN_MONTH_NAMES = {
@@ -359,6 +342,43 @@ def format_number(x):
             return x
     else:
         return str(x)
+
+def days_in_year(year: int) -> int:
+    return 366 if calendar.isleap(year) else 365
+
+def calculate_yearly_total_from_monthly_averages(df: pd.DataFrame, year: int) -> Tuple[float, int, int]:
+    """
+    Konverter månedsvis gjennomsnittlig døgntrafikk til totaltall.
+
+    Returnerer (total, antall_måneder_med_data, antall_dager_dekket).
+    """
+    year_col = str(year)
+    if df is None or df.empty or "Month" not in df.columns or year_col not in df.columns:
+        return 0.0, 0, 0
+
+    total = 0.0
+    months_present = 0
+    days_covered = 0
+
+    for _, row in df.iterrows():
+        try:
+            month = int(row["Month"])
+        except Exception:
+            continue
+
+        avg_daily = row.get(year_col, None)
+        if pd.isna(avg_daily) or avg_daily is None:
+            continue
+
+        if not (1 <= month <= 12):
+            continue
+
+        dim = calendar.monthrange(year, month)[1]
+        total += float(avg_daily) * dim
+        months_present += 1
+        days_covered += dim
+
+    return total, months_present, days_covered
 
 def calculate_growth_rates(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate year-over-year growth rates."""
@@ -665,6 +685,7 @@ def calculate_additional_statistics(df: pd.DataFrame) -> pd.DataFrame:
         for year in year_columns:
             year_data = df[year].dropna()
             if len(year_data) > 0:
+                year_total, _, _ = calculate_yearly_total_from_monthly_averages(df, int(year)) if str(year).isdigit() else (np.nan, 0, 0)
                 stats[year] = {
                     "Toppmåned": df.loc[year_data.idxmax(), "Month Name"] if "Month Name" in df.columns else "N/A",
                     "Toppvolum": year_data.max(),
@@ -672,7 +693,7 @@ def calculate_additional_statistics(df: pd.DataFrame) -> pd.DataFrame:
                     "Laveste volum": year_data.min(),
                     "Volumspenn": year_data.max() - year_data.min(),
                     "Variasjonskoeffisient (%)": (year_data.std() / year_data.mean() * 100).round(2),
-                    "Årlig total (estimert)": (year_data.mean() * 365).round(0),
+                    "Årstrafikk": year_total,
                     "Median": year_data.median(),
                     "Kvartil 1": year_data.quantile(0.25),
                     "Kvartil 3": year_data.quantile(0.75)
@@ -720,33 +741,6 @@ def create_export_section(df: pd.DataFrame, point: str):
             mime="application/json"
         )
 
-def analyze_toll_exemptions(df: pd.DataFrame, point: str, year: int) -> Optional[Tuple[pd.DataFrame, Dict]]:
-    """Enhanced toll exemption analysis."""
-    if year == 2024 and point in FERDE_DATA_2024:
-        ferde_data = FERDE_DATA_2024[point]
-        
-        analysis_df = pd.DataFrame({
-            "Måned": MONTH_NAMES[:12],
-            "Bompasseringer": [ferde_data["total_passeringer"][m] for m in range(1, 13)],
-            "Herav fritakspasseringer": [ferde_data["fritakspasseringer"][m] for m in range(1, 13)]
-        })
-        
-        analysis_df["Andel fritakspasseringer (%)"] = (
-            analysis_df["Herav fritakspasseringer"] / analysis_df["Bompasseringer"] * 100
-        ).round(2)
-        
-        analysis_df["Betalende passeringer"] = (
-            analysis_df["Bompasseringer"] - analysis_df["Herav fritakspasseringer"]
-        )
-        
-        return analysis_df, {
-            "total_passages": analysis_df["Bompasseringer"].sum(),
-            "total_exemptions": analysis_df["Herav fritakspasseringer"].sum(),
-            "total_paying": analysis_df["Betalende passeringer"].sum(),
-            "average_exemption_rate": analysis_df["Andel fritakspasseringer (%)"].mean()
-        }
-    return None
-
 def create_comparison_report(df: pd.DataFrame, point: str) -> str:
     """Generate a comprehensive comparison report."""
     report = f"""
@@ -762,12 +756,12 @@ def create_comparison_report(df: pd.DataFrame, point: str) -> str:
         previous_year = str(int(latest_year) - 1)
         
         if previous_year in year_columns:
-            latest_total = df[latest_year].sum()
-            previous_total = df[previous_year].sum()
-            growth = ((latest_total - previous_total) / previous_total * 100)
+            latest_total, latest_months, _ = calculate_yearly_total_from_monthly_averages(df, int(latest_year))
+            previous_total, _, _ = calculate_yearly_total_from_monthly_averages(df, int(previous_year))
+            growth = ((latest_total - previous_total) / previous_total * 100) if previous_total else 0
             
             report += f"""
-- **Totalt antall passeringer {latest_year}**: {format_number(latest_total * 365)} (estimert årlig)
+- **Totalt antall passeringer (Vegvesen-telling) {latest_year}**: {format_number(latest_total)} ({latest_months}/12 mnd)
 - **Endring fra {previous_year}**: {growth:+.1f}%
 - **Høyeste måned {latest_year}**: {df.loc[df[latest_year].idxmax(), 'Month Name']} ({format_number(df[latest_year].max())})
 - **Laveste måned {latest_year}**: {df.loc[df[latest_year].idxmin(), 'Month Name']} ({format_number(df[latest_year].min())})
@@ -1019,9 +1013,8 @@ def main():
                     st.stop()
 
             # Create tabs for different views
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "📈 Visualisering", "📊 Data", "📋 Statistikk", 
-                "💰 Bomanalyse", "📄 Rapport"
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "📈 Visualisering", "📊 Data", "📋 Statistikk", "📄 Rapport"
             ])
 
             with tab1:
@@ -1067,14 +1060,17 @@ def main():
                     year_columns = [col for col in df.columns if col.isdigit()]
                     if year_columns:
                         latest_year = max(year_columns, key=int)
-                        total_estimate = df[latest_year].sum() * 365
+                        latest_year_int = int(latest_year)
+                        total, months_present, days_covered = calculate_yearly_total_from_monthly_averages(df, latest_year_int)
+                        avg_per_day = (total / days_covered) if days_covered else None
+                        full_year_estimate = (avg_per_day * days_in_year(latest_year_int)) if avg_per_day is not None else None
                         
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric(
-                                "Estimert årstrafikk (nyeste år)",
-                                format_number(total_estimate),
-                                help=f"Basert på gjennomsnitt for {latest_year}"
+                                f"Trafikk {latest_year} ({'hittil' if months_present < 12 else 'totalt'})",
+                                format_number(total),
+                                help="Beregnet som (månedsvis gj.snitt per døgn) × (antall dager i måned), summert."
                             )
                         with col2:
                             peak_month = df.loc[df[latest_year].idxmax(), 'Month Name']
@@ -1084,12 +1080,19 @@ def main():
                                 f"{peak_month}: {format_number(peak_value)}"
                             )
                         with col3:
-                            variation = (df[latest_year].std() / df[latest_year].mean() * 100)
-                            st.metric(
-                                "Sesongvariasjon",
-                                f"{variation:.1f}%",
-                                help="Variasjonskoeffisient mellom måneder"
-                            )
+                            if months_present < 12 and full_year_estimate is not None:
+                                st.metric(
+                                    "Estimert helår",
+                                    format_number(full_year_estimate),
+                                    help="Ekstrapolerer fra tilgjengelige måneder ved å bruke vektet snitt per dag."
+                                )
+                            else:
+                                variation = (df[latest_year].std() / df[latest_year].mean() * 100)
+                                st.metric(
+                                    "Sesongvariasjon",
+                                    f"{variation:.1f}%",
+                                    help="Variasjonskoeffisient mellom måneder"
+                                )
 
             with tab3:
                 st.subheader("📋 Detaljert statistikk")
@@ -1109,66 +1112,6 @@ def main():
                 st.dataframe(advanced_stats.map(format_number), use_container_width=True)
 
             with tab4:
-                st.subheader("💰 Bompengeanalyse")
-                
-                if comparison_mode == "Sammenlign år" and 2024 in year_list and point in ["Ryfylketunnelen", "Hundvågtunnelen"]:
-                    exemption_analysis = analyze_toll_exemptions(df, point, 2024)
-                    
-                    if exemption_analysis:
-                        exemption_df, totals = exemption_analysis
-                        
-                        # Key metrics
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        with col1:
-                            st.metric(
-                                "Totale bompasseringer",
-                                format_number(totals["total_passages"])
-                            )
-                        with col2:
-                            st.metric(
-                                "Fritakspasseringer",
-                                format_number(totals["total_exemptions"]),
-                                f"{totals['average_exemption_rate']:.1f}%"
-                            )
-                        with col3:
-                            st.metric(
-                                "Betalende passeringer",
-                                format_number(totals["total_paying"])
-                            )
-                        with col4:
-                            revenue_estimate = totals["total_paying"] * 35  # Approximate toll
-                            st.metric(
-                                "Estimert inntekt (kr)",
-                                format_number(revenue_estimate),
-                                help="Basert på ca. 35 kr per passering"
-                            )
-                        
-                        # Detailed table
-                        st.write("**Detaljert bompengestatistikk for 2024:**")
-                        formatted_exemption_df = exemption_df.copy()
-                        numeric_cols = ["Bompasseringer", "Herav fritakspasseringer", "Betalende passeringer"]
-                        for col in numeric_cols:
-                            formatted_exemption_df[col] = formatted_exemption_df[col].map(format_number)
-                        
-                        st.dataframe(formatted_exemption_df, hide_index=True, use_container_width=True)
-                        
-                        # Visualization
-                        fig_toll = px.line(
-                            exemption_df,
-                            x="Måned",
-                            y="Andel fritakspasseringer (%)",
-                            title=f"Fritakspasseringer for {point} i 2024",
-                            markers=True
-                        )
-                        fig_toll.update_layout(yaxis_title="Prosent fritakspasseringer")
-                        st.plotly_chart(fig_toll, use_container_width=True)
-                    else:
-                        st.info("Bompengedata er kun tilgjengelig for Ryfylke- og Hundvågtunnelen i 2024")
-                else:
-                    st.info("Bompengeanalyse krever at 2024 er valgt og at punktet er Ryfylke- eller Hundvågtunnelen")
-
-            with tab5:
                 st.subheader("📄 Automatisk rapport")
                 
                 report_text = create_comparison_report(df, point)
