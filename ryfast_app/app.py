@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import altair as alt
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
@@ -589,11 +590,106 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
     return fig
 
 
+def _year_columns(df: pd.DataFrame) -> List[str]:
+    return [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
+
+
+def _long_year_df(df: pd.DataFrame) -> pd.DataFrame:
+    years = _year_columns(df)
+    if "Month Name" in df.columns:
+        id_vars = ["Month", "Month Name"]
+    elif "Week" in df.columns:
+        id_vars = ["Week"]
+    else:
+        id_vars = []
+    melted = df.melt(id_vars=id_vars, value_vars=years, var_name="År", value_name="Trafikk")
+    melted["Trafikk"] = pd.to_numeric(melted["Trafikk"], errors="coerce")
+    return melted.dropna(subset=["Trafikk"])
+
+
+def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
+    years = _year_columns(df)
+    if not years:
+        st.warning("Fant ingen årskolonner i datasettet. Viser linjediagram.")
+        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+        return
+
+    long_df = _long_year_df(df)
+    if long_df.empty:
+        st.warning("Fant ingen plottbare data. Viser linjediagram.")
+        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+        return
+
+    if chart_type == "heatmap":
+        if "Month Name" not in long_df.columns or len(years) < 2:
+            st.info("Varmekart krever minst 2 år og månedsdata.")
+            st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+            return
+
+        month_sort = MONTH_NAMES
+        chart = (
+            alt.Chart(long_df)
+            .mark_rect()
+            .encode(
+                x=alt.X("Month Name:N", sort=month_sort, title="Måned"),
+                y=alt.Y("År:N", sort=sorted([str(y) for y in years]), title="År"),
+                color=alt.Color("Trafikk:Q", scale=alt.Scale(scheme="redyellowblue", reverse=True), title="Trafikk"),
+                tooltip=[
+                    alt.Tooltip("År:N"),
+                    alt.Tooltip("Month Name:N", title="Måned"),
+                    alt.Tooltip("Trafikk:Q", format=",.0f"),
+                ],
+            )
+            .properties(title=f"Sesongmønster for {point}", height=420)
+        )
+        st.altair_chart(chart, use_container_width=True)
+        return
+
+    if chart_type == "box":
+        chart = (
+            alt.Chart(long_df)
+            .mark_boxplot(extent="min-max")
+            .encode(
+                x=alt.X("År:N", sort=sorted([str(y) for y in years]), title="År"),
+                y=alt.Y("Trafikk:Q", title="Gjennomsnittlig døgntrafikk"),
+                color=alt.Color("År:N", legend=None),
+                tooltip=[alt.Tooltip("År:N"), alt.Tooltip("Trafikk:Q", format=",.0f")],
+            )
+            .properties(title=f"Trafikkfordeling for {point}", height=420)
+        )
+        st.altair_chart(chart, use_container_width=True)
+        return
+
+    if chart_type == "line_with_confidence":
+        if "Month Name" in long_df.columns:
+            x = alt.X("Month Name:N", sort=MONTH_NAMES, title="Måned")
+        elif "Week" in long_df.columns:
+            x = alt.X("Week:N", title="Uke")
+        else:
+            x = alt.X("index:O", title="Periode")
+
+        chart = (
+            alt.Chart(long_df)
+            .mark_line(point=True)
+            .encode(
+                x=x,
+                y=alt.Y("Trafikk:Q", title="Gjennomsnittlig døgntrafikk"),
+                color=alt.Color("År:N", sort=sorted([str(y) for y in years])),
+                tooltip=[alt.Tooltip("År:N"), alt.Tooltip("Trafikk:Q", format=",.0f")],
+            )
+            .properties(title=f"Trafikkutvikling for {point}", height=420)
+        )
+        st.altair_chart(chart, use_container_width=True)
+        return
+
+    st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+
+
 def create_comparison_dashboard(df: pd.DataFrame, point: str):
     col1, col2 = st.columns(2)
     with col1:
         is_weekly = "Volume" in df.columns
-        year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
+        year_columns = _year_columns(df)
         can_heatmap = (not is_weekly) and ("Month Name" in df.columns) and (len(year_columns) > 1)
 
         if is_weekly:
@@ -620,18 +716,16 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
     with col2:
         show_growth = st.checkbox("Vis vekstrater", value=False)
 
-    fig = create_advanced_visualization(df, point, chart_type)
-    if not getattr(fig, "data", None):
-        st.warning("Fant ingen plottbare data for valgt diagramtype. Viser linjediagram i stedet.")
-        fig = create_advanced_visualization(df, point, "line")
-        chart_type = "line"
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        key=f"main_chart_{chart_type}",
-        config={"displayModeBar": True, "responsive": True},
-    )
+    if chart_type in {"heatmap", "box", "line_with_confidence"}:
+        _render_altair_chart(df, point, chart_type)
+    else:
+        fig = create_advanced_visualization(df, point, chart_type)
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key=f"main_chart_{chart_type}",
+            config={"displayModeBar": True, "responsive": True},
+        )
 
     if show_growth:
         growth_df = calculate_growth_rates(df)
@@ -661,15 +755,19 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
             if growth_melted.empty:
                 st.warning("Fant ingen gyldige vekstrater i datasettet (mangler baseline eller nullverdier).")
             else:
-                fig_growth = px.bar(
-                    growth_melted,
-                    x=x_col,
-                    y="Vekst (%)",
-                    color="Periode",
-                    title="År-til-år vekstrater",
+                zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="black", strokeDash=[4, 4]).encode(y="y:Q")
+                bars = (
+                    alt.Chart(growth_melted)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X(f"{x_col}:N", title="Periode"),
+                        y=alt.Y("Vekst (%):Q", title="Vekst (%)"),
+                        color=alt.Color("Periode:N"),
+                        tooltip=[alt.Tooltip("Periode:N"), alt.Tooltip("Vekst (%):Q", format=".1f")],
+                    )
+                    .properties(height=320)
                 )
-                fig_growth.add_hline(y=0, line_dash="dash", line_color="black")
-                st.plotly_chart(fig_growth, use_container_width=True, key="growth_chart")
+                st.altair_chart((bars + zero).properties(title="År-til-år vekstrater"), use_container_width=True)
 
 
 def process_data_for_years(point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool) -> pd.DataFrame:
