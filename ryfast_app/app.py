@@ -155,6 +155,8 @@ def days_in_year(year: int) -> int:
 def init_session_state():
     if "comparison_history" not in st.session_state:
         st.session_state.comparison_history = []
+    if "last_result" not in st.session_state:
+        st.session_state.last_result = None
 
 
 def _fetch_data_uncached(query: str, timeout_s: int) -> Optional[Dict]:
@@ -193,13 +195,23 @@ def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, us
         return {}
 
     result: Dict[str, List[Dict]] = {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_point = {}
+    if use_cache:
         for point_id in point_ids:
             query = QUERY_TEMPLATE.format(point_id=point_id, year=year)
-            future_to_point[executor.submit(fetch_data, query, timeout_s, use_cache)] = point_id
+            data = fetch_data(query, timeout_s, use_cache=True)
+            if data and data.get("data", {}).get("trafficData"):
+                monthly = data["data"]["trafficData"]["volume"]["average"]["daily"]["byMonth"]
+                if monthly:
+                    result[point_id] = monthly
+        return result
 
-        for future, point_id in list(future_to_point.items()):
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_point = {
+            executor.submit(_fetch_data_uncached, QUERY_TEMPLATE.format(point_id=pid, year=year), timeout_s): pid
+            for pid in point_ids
+        }
+
+        for future, point_id in future_to_point.items():
             try:
                 data = future.result()
                 if data and data.get("data", {}).get("trafficData"):
@@ -748,98 +760,148 @@ def main():
     st.sidebar.header("⚙️ Innstillinger")
     point_options = list(TRAFFIC_POINTS.keys())
     point_descriptions = [f"{p} - {TRAFFIC_POINTS[p]['description']}" for p in point_options]
-    selected_index = st.sidebar.selectbox("Velg målepunkt", range(len(point_options)), format_func=lambda x: point_descriptions[x])
-    point = point_options[selected_index]
 
-    with st.sidebar.expander("ℹ️ Om valgt målepunkt"):
-        st.write(f"**Beskrivelse:** {TRAFFIC_POINTS[point]['description']}")
-        st.write(f"**Åpnet:** {TRAFFIC_POINTS[point]['opened']}")
-
-    comparison_mode = st.sidebar.radio("Velg analysetype", ["Sammenlign år", "Sammenlign måneder", "Sammenlign uker"])
-
-    with st.sidebar.expander("🔧 Avanserte innstillinger"):
-        use_cache = st.checkbox("Bruk hurtigbuffer", value=True)
-        timeout_s = st.slider("API timeout (sekunder)", 10, 90, 60)
-
-    if point == "Ryfast (sum tunneler)":
-        include_ramp = st.sidebar.checkbox(
-            "Inkluder pårampe i Hundvågtunnelen",
-            value=True,
-            key="ryfast_include_ramp",
-            help="Når av, summeres kun hovedløpene (uten pårampe) for Hundvågtunnelen.",
+    with st.sidebar.form("controls", clear_on_submit=False):
+        selected_index = st.selectbox(
+            "Velg målepunkt",
+            range(len(point_options)),
+            format_func=lambda x: point_descriptions[x],
+            key="point_selector",
         )
-        ryfylke_ids = TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
-        hundvag_ids = TRAFFIC_POINTS["Hundvågtunnelen"]["ids"] if include_ramp else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
-        point_ids = ryfylke_ids + hundvag_ids
-    elif point == "Ryfylketunnelen":
-        point_ids = TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
-    elif point == "Hundvågtunnelen":
-        point_ids = TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
-    else:
-        direction = st.sidebar.selectbox("Velg retning", ["Begge retninger", "Mot nord", "Mot sør"])
-        if direction == "Begge retninger":
-            point_ids = TRAFFIC_POINTS["Bybrua"]["ids"]["Mot nord"] + TRAFFIC_POINTS["Bybrua"]["ids"]["Mot sør"]
+        point = point_options[selected_index]
+
+        with st.expander("ℹ️ Om valgt målepunkt"):
+            st.write(f"**Beskrivelse:** {TRAFFIC_POINTS[point]['description']}")
+            st.write(f"**Åpnet:** {TRAFFIC_POINTS[point]['opened']}")
+
+        comparison_mode = st.radio(
+            "Velg analysetype",
+            ["Sammenlign år", "Sammenlign måneder", "Sammenlign uker"],
+            key="comparison_mode",
+        )
+
+        with st.expander("🔧 Avanserte innstillinger"):
+            use_cache = st.checkbox("Bruk hurtigbuffer", value=True, key="use_cache")
+            timeout_s = st.slider("API timeout (sekunder)", 10, 90, 60, key="timeout_s")
+
+        include_ramp = True
+        direction = "Begge retninger"
+        if point == "Ryfast (sum tunneler)":
+            include_ramp = st.checkbox(
+                "Inkluder pårampe i Hundvågtunnelen",
+                value=True,
+                key="ryfast_include_ramp",
+                help="Når av, summeres kun hovedløpene (uten pårampe) for Hundvågtunnelen.",
+            )
+        elif point == "Bybrua":
+            direction = st.selectbox("Velg retning", ["Begge retninger", "Mot nord", "Mot sør"], key="bybrua_direction")
+
+        year_input = DEFAULT_YEARS
+        year_list: List[int] = []
+        year = 2025
+        months: List[int] = []
+        weeks: List[int] = []
+
+        if comparison_mode == "Sammenlign år":
+            year_input = st.text_input("År (komma-separert)", value=DEFAULT_YEARS, key="years_input")
+        elif comparison_mode == "Sammenlign måneder":
+            year = st.selectbox("År", list(YEAR_RANGE), index=list(YEAR_RANGE).index(2025) if 2025 in YEAR_RANGE else 0, key="months_year")
+            months = st.multiselect(
+                "Velg måneder",
+                list(range(1, 13)),
+                default=list(range(1, 13)),
+                format_func=lambda m: MONTH_NAMES[m - 1],
+                key="months_selected",
+            )
         else:
-            point_ids = TRAFFIC_POINTS["Bybrua"]["ids"][direction]
+            year = st.selectbox("År", list(YEAR_RANGE), index=list(YEAR_RANGE).index(2025) if 2025 in YEAR_RANGE else 0, key="weeks_year")
+            weeks = st.multiselect("Velg uker", list(range(1, 53)), default=list(range(1, 11)), key="weeks_selected")
 
-    if comparison_mode == "Sammenlign år":
-        year_input = st.sidebar.text_input("År (komma-separert)", value=DEFAULT_YEARS)
-        try:
-            year_list = [int(y.strip()) for y in year_input.split(",") if y.strip()]
-        except Exception:
-            st.sidebar.error("Ugyldig format. Bruk f.eks. 2024,2025")
-            st.stop()
-        if not year_list:
-            st.sidebar.warning("Velg minst ett år")
-            st.stop()
-        if any(y not in YEAR_RANGE for y in year_list):
-            st.sidebar.warning(f"Støttet år: {min(YEAR_RANGE)}–{max(YEAR_RANGE)}")
-        year = year_list[-1]
-        months = []
-        weeks = []
-    elif comparison_mode == "Sammenlign måneder":
-        year_list = []
-        year = st.sidebar.selectbox("År", list(YEAR_RANGE), index=list(YEAR_RANGE).index(2025) if 2025 in YEAR_RANGE else 0)
-        months = st.sidebar.multiselect("Velg måneder", list(range(1, 13)), default=list(range(1, 13)), format_func=lambda m: MONTH_NAMES[m - 1])
-        weeks = []
-        if not months:
+        submitted = st.form_submit_button("📊 Analyser data", type="primary")
+
+    if st.sidebar.button("🗑️ Tøm cache"):
+        st.cache_data.clear()
+        st.session_state.last_result = None
+        st.sidebar.success("Cache tømt!")
+
+    def resolve_point_ids() -> List[str]:
+        if point == "Ryfast (sum tunneler)":
+            ryfylke_ids = TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
+            hundvag_ids = TRAFFIC_POINTS["Hundvågtunnelen"]["ids"] if include_ramp else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
+            return ryfylke_ids + hundvag_ids
+        if point == "Ryfylketunnelen":
+            return TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
+        if point == "Hundvågtunnelen":
+            return TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
+        if direction == "Begge retninger":
+            return TRAFFIC_POINTS["Bybrua"]["ids"]["Mot nord"] + TRAFFIC_POINTS["Bybrua"]["ids"]["Mot sør"]
+        return TRAFFIC_POINTS["Bybrua"]["ids"][direction]
+
+    if submitted:
+        if comparison_mode == "Sammenlign år":
+            try:
+                year_list = [int(y.strip()) for y in year_input.split(",") if y.strip()]
+            except Exception:
+                st.sidebar.error("Ugyldig format. Bruk f.eks. 2024,2025")
+                st.session_state.last_result = None
+                year_list = []
+            if not year_list:
+                st.sidebar.warning("Velg minst ett år")
+                st.session_state.last_result = None
+            else:
+                year = year_list[-1]
+
+        if comparison_mode == "Sammenlign måneder" and not months:
             st.sidebar.warning("Velg minst én måned")
-            st.stop()
-    else:
-        year_list = []
-        year = st.sidebar.selectbox("År", list(YEAR_RANGE), index=list(YEAR_RANGE).index(2025) if 2025 in YEAR_RANGE else 0)
-        weeks = st.sidebar.multiselect("Velg uker", list(range(1, 53)), default=list(range(1, 11)))
-        months = []
-        if not weeks:
+            st.session_state.last_result = None
+        if comparison_mode == "Sammenlign uker" and not weeks:
             st.sidebar.warning("Velg minst én uke")
-            st.stop()
+            st.session_state.last_result = None
 
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        fetch_data_btn = st.button("📊 Analyser data", type="primary")
-    with col2:
-        if st.button("🗑️ Tøm cache"):
-            st.cache_data.clear()
-            st.sidebar.success("Cache tømt!")
+        point_ids = resolve_point_ids()
 
-    if not fetch_data_btn:
+        if (comparison_mode == "Sammenlign år" and year_list) or (comparison_mode != "Sammenlign år"):
+            with st.spinner("🔄 Behandler data..."):
+                if comparison_mode == "Sammenlign år":
+                    df = process_data_for_years(point_ids, year_list, timeout_s, use_cache)
+                    title = f"Årlig sammenligning for {point}"
+                elif comparison_mode == "Sammenlign måneder":
+                    df = process_data_for_months(point_ids, year, months, timeout_s, use_cache)
+                    title = f"Månedlig analyse for {point} i {year}"
+                else:
+                    df = process_data_for_weeks(point_ids, year, weeks, timeout_s, use_cache)
+                    title = f"Ukentlig analyse for {point} i {year}"
+
+            if df is None or df.empty:
+                st.error("❌ Ingen data tilgjengelig for valgte kriterier")
+                st.session_state.last_result = None
+            else:
+                st.session_state.last_result = {
+                    "df": df,
+                    "title": title,
+                    "point": point,
+                    "comparison_mode": comparison_mode,
+                    "year_list": year_list,
+                    "year": year,
+                    "point_ids": point_ids,
+                    "timeout_s": timeout_s,
+                    "use_cache": use_cache,
+                }
+
+    if not st.session_state.last_result:
         st.info("Velg målepunkt og analysetype i sidebaren, og trykk «Analyser data».")
         return
 
-    with st.spinner("🔄 Behandler data..."):
-        if comparison_mode == "Sammenlign år":
-            df = process_data_for_years(point_ids, year_list, timeout_s, use_cache)
-            title = f"Årlig sammenligning for {point}"
-        elif comparison_mode == "Sammenlign måneder":
-            df = process_data_for_months(point_ids, year, months, timeout_s, use_cache)
-            title = f"Månedlig analyse for {point} i {year}"
-        else:
-            df = process_data_for_weeks(point_ids, year, weeks, timeout_s, use_cache)
-            title = f"Ukentlig analyse for {point} i {year}"
-
-    if df is None or df.empty:
-        st.error("❌ Ingen data tilgjengelig for valgte kriterier")
-        return
+    result = st.session_state.last_result
+    df = result["df"]
+    title = result["title"]
+    point = result["point"]
+    comparison_mode = result["comparison_mode"]
+    year_list = result["year_list"]
+    year = result["year"]
+    point_ids = result["point_ids"]
+    timeout_s = result["timeout_s"]
+    use_cache = result["use_cache"]
 
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Visualisering", "📊 Data", "🧮 Totaltall", "📄 Rapport"])
 

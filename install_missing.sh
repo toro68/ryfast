@@ -14,9 +14,10 @@ elif [[ -f "myenv/bin/activate" ]]; then
 fi
 
 if [[ -z "$VENV_ACTIVATE" ]]; then
-  echo "❌ Fant ikke virtuelt miljø i ./.venv eller ./myenv"
-  echo "💡 Opprett et venv først (anbefalt): python -m venv .venv"
-  exit 1
+  echo "ℹ️ Fant ikke virtuelt miljø i ./.venv eller ./myenv"
+  echo "🔧 Oppretter .venv..."
+  python -m venv .venv
+  VENV_ACTIVATE=".venv/bin/activate"
 fi
 
 # Aktiver virtuelt miljø
