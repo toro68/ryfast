@@ -1,6 +1,7 @@
 import calendar
 import io
 import logging
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -13,6 +14,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from fpdf import FPDF
+from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.styles import Font
 
 try:
     import openpyxl  # noqa: F401
@@ -132,6 +138,17 @@ query {{
   }}
 }}
 """
+
+POINT_ID_LABELS: Dict[str, str] = {
+    "99040V2725982": "Ryfylketunnelen (A)",
+    "00911V2725983": "Ryfylketunnelen (B)",
+    "10239V2725979": "Hundvågtunnelen (A)",
+    "62464V2725991": "Hundvågtunnelen (pårampe?)",
+    "92743V2726085": "Hundvågtunnelen (B)",
+    "25926V2725990": "Hundvågtunnelen (pårampe?)",
+    "17949V320695": "Bybrua (Mot nord)",
+    "54184V320694": "Bybrua (Mot sør)",
+}
 
 
 def format_number(x):
@@ -326,6 +343,99 @@ def calculate_yearly_total_from_monthly_averages(df: pd.DataFrame, year: int) ->
     return total, months_present, days_covered
 
 
+def extract_point_monthly_metrics(traffic_by_point: Dict[str, List[Dict]], year: int) -> pd.DataFrame:
+    """
+    Returnerer per-punkt/per-måned:
+      - avg_daily (ÅDT)
+      - coverage_pct
+      - ci_lower/ci_upper (ÅDT), hvis tilgjengelig
+    """
+    rows: List[Dict[str, object]] = []
+    for point_id, entries in (traffic_by_point or {}).items():
+        for entry in entries or []:
+            month = int(entry.get("month", 0) or 0)
+            if not (1 <= month <= 12):
+                continue
+            total = entry.get("total", {}) or {}
+            volume = (total.get("volume", {}) or {}).get("average")
+            cov = (total.get("coverage", {}) or {}).get("percentage")
+            ci = (total.get("volume", {}) or {}).get("confidenceInterval") or {}
+            rows.append(
+                {
+                    "point_id": point_id,
+                    "point_label": POINT_ID_LABELS.get(point_id, point_id),
+                    "year": year,
+                    "month": month,
+                    "month_name": MONTH_NAMES[month - 1],
+                    "avg_daily": float(volume) if volume is not None else np.nan,
+                    "coverage_pct": float(cov) if cov is not None else np.nan,
+                    "ci_lower": float(ci["lowerBound"]) if ci.get("lowerBound") is not None else np.nan,
+                    "ci_upper": float(ci["upperBound"]) if ci.get("upperBound") is not None else np.nan,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def coverage_pivot(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    if metrics_df is None or metrics_df.empty:
+        return pd.DataFrame()
+    pivot = metrics_df.pivot_table(
+        index="month_name",
+        columns="point_label",
+        values="coverage_pct",
+        aggfunc="mean",
+    ).reindex(MONTH_NAMES)
+    return pivot
+
+
+def group_coverage_by_month(metrics_df: pd.DataFrame, point_ids_by_group: Dict[str, List[str]]) -> pd.DataFrame:
+    if metrics_df is None or metrics_df.empty:
+        return pd.DataFrame()
+    group_rows: List[pd.DataFrame] = []
+    for group, ids in point_ids_by_group.items():
+        labels = {POINT_ID_LABELS.get(pid, pid) for pid in ids}
+        sub = metrics_df[metrics_df["point_label"].isin(labels)].copy()
+        if sub.empty:
+            continue
+        grouped = (
+            sub.groupby("month_name", as_index=False)
+            .agg(coverage_pct=("coverage_pct", "mean"))
+            .assign(group=group)
+        )
+        group_rows.append(grouped)
+    if not group_rows:
+        return pd.DataFrame()
+    out = pd.concat(group_rows, ignore_index=True)
+    out["month_name"] = pd.Categorical(out["month_name"], categories=MONTH_NAMES, ordered=True)
+    out = out.sort_values(["month_name", "group"])
+    return out
+
+
+def totals_with_uncertainty_from_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lager per måned totals (passeringer) og et "min/max"-intervall basert på CI.
+    Merk: Summert CI på tvers av punkter er en forenkling (indikativ usikkerhet).
+    """
+    if metrics_df is None or metrics_df.empty:
+        return pd.DataFrame()
+    tmp = metrics_df.copy()
+    tmp["days_in_month"] = tmp["month"].apply(lambda m: calendar.monthrange(int(tmp["year"].iloc[0]), int(m))[1])
+    tmp["total"] = tmp["avg_daily"] * tmp["days_in_month"]
+    tmp["total_lower"] = tmp["ci_lower"] * tmp["days_in_month"]
+    tmp["total_upper"] = tmp["ci_upper"] * tmp["days_in_month"]
+    out = (
+        tmp.groupby(["month", "month_name"], as_index=False)
+        .agg(
+            total=("total", "sum"),
+            total_lower=("total_lower", "sum"),
+            total_upper=("total_upper", "sum"),
+            coverage_pct=("coverage_pct", "mean"),
+        )
+        .sort_values("month")
+    )
+    return out
+
+
 def monthly_totals_from_monthly_averages(df: pd.DataFrame, year: int) -> pd.Series:
     year_col = str(year)
     if df is None or df.empty or "Month" not in df.columns or year_col not in df.columns:
@@ -442,6 +552,207 @@ def export_to_excel(df: pd.DataFrame) -> bytes:
             pd.DataFrame(seasonal).T.to_excel(writer, sheet_name="Sesongmønstre")
     return output.getvalue()
 
+def build_excel_report(
+    df: pd.DataFrame,
+    point: str,
+    comparison_mode: str,
+    year_list: List[int],
+    year: int,
+    point_ids: List[str],
+    timeout_s: int,
+    use_cache: bool,
+    coverage_threshold: float,
+) -> bytes:
+    wb = Workbook()
+    ws_meta = wb.active
+    ws_meta.title = "Metadata"
+    ws_meta["A1"] = "Ryfast - rapport"
+    ws_meta["A1"].font = Font(bold=True, size=14)
+    meta_rows = [
+        ("Generert", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Målepunkt", point),
+        ("Analysetype", comparison_mode),
+        ("År", ",".join(map(str, year_list)) if comparison_mode == "Sammenlign år" else str(year)),
+        ("Punkt-IDer", ", ".join(point_ids)),
+        ("Timeout (s)", str(timeout_s)),
+        ("Cache", "Ja" if use_cache else "Nei"),
+        ("Min. dekning (%)", f"{coverage_threshold:.0f}"),
+    ]
+    for i, (k, v) in enumerate(meta_rows, start=3):
+        ws_meta[f"A{i}"] = k
+        ws_meta[f"B{i}"] = v
+        ws_meta[f"A{i}"].font = Font(bold=True)
+    ws_meta.column_dimensions["A"].width = 20
+    ws_meta.column_dimensions["B"].width = 120
+
+    # Data sheet
+    ws_data = wb.create_sheet("Data")
+    ws_data.append(list(df.columns))
+    for row in df.itertuples(index=False):
+        ws_data.append(list(row))
+
+    # Totals sheet (if applicable)
+    if comparison_mode != "Sammenlign uker":
+        years_for_totals = year_list if comparison_mode == "Sammenlign år" else [year]
+        totals_df = compute_monthly_totals_table(df, years_for_totals)
+        ws_tot = wb.create_sheet("Totals")
+        ws_tot.append(list(totals_df.columns))
+        for row in totals_df.itertuples(index=False):
+            ws_tot.append(list(row))
+
+        # Simple chart
+        if len(years_for_totals) >= 1:
+            chart = LineChart()
+            chart.title = "Totale passeringer per måned"
+            chart.y_axis.title = "Passeringer"
+            chart.x_axis.title = "Måned"
+            data_ref = Reference(ws_tot, min_col=3, min_row=1, max_col=2 + len(years_for_totals), max_row=1 + len(totals_df))
+            cats = Reference(ws_tot, min_col=2, min_row=2, max_row=1 + len(totals_df))
+            chart.add_data(data_ref, titles_from_data=True)
+            chart.set_categories(cats)
+            ws_tot.add_chart(chart, "H2")
+
+    # Coverage sheets (on-demand for a selected year)
+    if comparison_mode != "Sammenlign uker":
+        selected_year = max(year_list) if comparison_mode == "Sammenlign år" else year
+        traffic_by_point = fetch_batch_traffic_data(point_ids, int(selected_year), timeout_s, use_cache)
+        metrics = extract_point_monthly_metrics(traffic_by_point, int(selected_year))
+        if not metrics.empty:
+            cov_piv = coverage_pivot(metrics)
+            ws_cov = wb.create_sheet("Coverage (per point)")
+            ws_cov.append(["Måned"] + list(cov_piv.columns))
+            for month in MONTH_NAMES:
+                row = [month]
+                if month in cov_piv.index:
+                    row += [float(x) if pd.notna(x) else None for x in cov_piv.loc[month].tolist()]
+                else:
+                    row += [None] * len(cov_piv.columns)
+                ws_cov.append(row)
+
+            # Conditional formatting: red if below threshold
+            if cov_piv.shape[1] > 0:
+                start_cell = ws_cov.cell(row=2, column=2).coordinate
+                end_cell = ws_cov.cell(row=1 + len(MONTH_NAMES), column=1 + cov_piv.shape[1]).coordinate
+                ws_cov.conditional_formatting.add(
+                    f"{start_cell}:{end_cell}",
+                    CellIsRule(operator="lessThan", formula=[str(float(coverage_threshold))], stopIfTrue=True, font=Font(color="9C0006")),
+                )
+
+            if point == "Ryfast (sum tunneler)":
+                point_ids_by_group = {
+                    "Ryfylketunnelen": TRAFFIC_POINTS["Ryfylketunnelen"]["ids"],
+                    "Hundvågtunnelen": (
+                        TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
+                        if st.session_state.get("ryfast_include_ramp", True)
+                        else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
+                    ),
+                }
+                grouped = group_coverage_by_month(metrics, point_ids_by_group)
+                if not grouped.empty:
+                    ws_g = wb.create_sheet("Coverage (tunnel)")
+                    ws_g.append(["Måned", "Tunnel", "Dekning (%)"])
+                    for row in grouped.itertuples(index=False):
+                        ws_g.append([row.month_name, row.group, float(row.coverage_pct) if pd.notna(row.coverage_pct) else None])
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+def build_pdf_report(
+    df: pd.DataFrame,
+    point: str,
+    comparison_mode: str,
+    year_list: List[int],
+    year: int,
+    point_ids: List[str],
+    timeout_s: int,
+    use_cache: bool,
+    coverage_threshold: float,
+) -> bytes:
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Ryfast - rapport", ln=True)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.multi_cell(
+        0,
+        6,
+        f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Målepunkt: {point}\n"
+        f"Analysetype: {comparison_mode}\n"
+        f"År: {','.join(map(str, year_list)) if comparison_mode == 'Sammenlign år' else str(year)}\n"
+        f"Min. dekning: {coverage_threshold:.0f}%\n"
+        f"Punkt-IDer: {', '.join(point_ids)}",
+    )
+
+    if comparison_mode != "Sammenlign uker":
+        selected_year = max(year_list) if comparison_mode == "Sammenlign år" else year
+        traffic_by_point = fetch_batch_traffic_data(point_ids, int(selected_year), timeout_s, use_cache)
+        metrics = extract_point_monthly_metrics(traffic_by_point, int(selected_year))
+        totals_ci = totals_with_uncertainty_from_metrics(metrics)
+        if not totals_ci.empty:
+            try:
+                totals_ci_sorted = totals_ci.sort_values("month")
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=totals_ci_sorted["month_name"], y=totals_ci_sorted["total"], name="Totalt"))
+                fig.add_trace(
+                    go.Scatter(
+                        x=totals_ci_sorted["month_name"],
+                        y=totals_ci_sorted["total_lower"],
+                        mode="lines",
+                        line=dict(width=0),
+                        showlegend=False,
+                        hoverinfo="skip",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=totals_ci_sorted["month_name"],
+                        y=totals_ci_sorted["total_upper"],
+                        mode="lines",
+                        line=dict(width=0),
+                        fill="tonexty",
+                        fillcolor="rgba(31,119,180,0.18)",
+                        name="Usikkerhet (indikativ)",
+                    )
+                )
+                fig.update_layout(
+                    title=f"Totale passeringer per måned ({selected_year})",
+                    yaxis_title="Passeringer",
+                    xaxis_title="Måned",
+                    template="plotly_white",
+                    height=360,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                )
+                img_bytes = fig.to_image(format="png", scale=2)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(img_bytes)
+                    img_path = tmp.name
+                pdf.ln(2)
+                pdf.image(img_path, w=190)
+            except Exception:
+                pass
+        if not totals_ci.empty:
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.cell(0, 8, f"Totale passeringer (indikativ usikkerhet) - {selected_year}", ln=True)
+            pdf.set_font("Helvetica", "", 10)
+            for _, r in totals_ci.iterrows():
+                if pd.isna(r["total"]):
+                    continue
+                pdf.cell(
+                    0,
+                    6,
+                    f"{r['month_name']}: {int(round(r['total'])):,}  "
+                    f"[{int(round(r['total_lower'])):,} – {int(round(r['total_upper'])):,}]  "
+                    f"dekning {r['coverage_pct']:.1f}%",
+                    ln=True,
+                )
+
+    return pdf.output(dest="S").encode("latin-1")
+
 
 def create_export_section(df: pd.DataFrame, point: str):
     st.subheader("📊 Eksporter data")
@@ -475,6 +786,50 @@ def create_export_section(df: pd.DataFrame, point: str):
             )
         else:
             st.caption("Excel-export krever `openpyxl`.")
+
+    st.markdown("### 📦 Ferdig rapport (anbefalt)")
+    st.caption("Inkluderer metadata, data, dekning og (der mulig) grafer i Excel/PDF.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📊 Lag Excel-rapport", type="secondary"):
+            result = st.session_state.get("last_result") or {}
+            report_bytes = build_excel_report(
+                df=df,
+                point=point,
+                comparison_mode=result.get("comparison_mode", ""),
+                year_list=result.get("year_list", []),
+                year=int(result.get("year", 0) or 0),
+                point_ids=result.get("point_ids", []),
+                timeout_s=int(result.get("timeout_s", 60)),
+                use_cache=bool(result.get("use_cache", True)),
+                coverage_threshold=float(result.get("coverage_threshold", 90)),
+            )
+            st.download_button(
+                "⬇️ Last ned Excel-rapport",
+                data=report_bytes,
+                file_name=f"ryfast_rapport_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    with c2:
+        if st.button("📄 Lag PDF-rapport", type="secondary"):
+            result = st.session_state.get("last_result") or {}
+            report_bytes = build_pdf_report(
+                df=df,
+                point=point,
+                comparison_mode=result.get("comparison_mode", ""),
+                year_list=result.get("year_list", []),
+                year=int(result.get("year", 0) or 0),
+                point_ids=result.get("point_ids", []),
+                timeout_s=int(result.get("timeout_s", 60)),
+                use_cache=bool(result.get("use_cache", True)),
+                coverage_threshold=float(result.get("coverage_threshold", 90)),
+            )
+            st.download_button(
+                "⬇️ Last ned PDF-rapport",
+                data=report_bytes,
+                file_name=f"ryfast_rapport_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+            )
 
 
 def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str) -> go.Figure:
@@ -897,6 +1252,125 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
         st.dataframe(formatted_totals, use_container_width=True, hide_index=True)
 
 
+def render_data_quality_tab(
+    point: str,
+    comparison_mode: str,
+    year_list: List[int],
+    year: int,
+    point_ids: List[str],
+    timeout_s: int,
+    use_cache: bool,
+    coverage_threshold: float,
+):
+    st.subheader("🛡️ Dekning og datakvalitet")
+    st.caption(
+        "Dekning (%) er rapportert datadekning fra Vegvesen. "
+        "Lav dekning kan gi skjevheter. Usikkerhet er indikativ og basert på oppgitte konfidensintervaller."
+    )
+
+    if comparison_mode == "Sammenlign uker":
+        st.info("Datakvalitet for ukesvisning kommer (krever egen aggregering av dekning per dag/uke).")
+        return
+
+    years = year_list if comparison_mode == "Sammenlign år" else [year]
+    selected_year = st.selectbox("År", options=years, index=len(years) - 1, key="dq_year")
+
+    traffic_by_point = fetch_batch_traffic_data(point_ids, int(selected_year), timeout_s, use_cache)
+    metrics = extract_point_monthly_metrics(traffic_by_point, int(selected_year))
+    if metrics.empty:
+        st.warning("Fant ingen dekning/data for valgt år.")
+        return
+
+    below = metrics[(metrics["coverage_pct"].notna()) & (metrics["coverage_pct"] < coverage_threshold)]
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Dekningsterskel", f"{coverage_threshold:.0f}%")
+    with m2:
+        st.metric("Observasjoner under terskel", str(len(below)))
+    with m3:
+        st.metric("Snitt dekning", f"{metrics['coverage_pct'].mean():.1f}%" if metrics["coverage_pct"].notna().any() else "N/A")
+
+    if not below.empty:
+        bad_months = (
+            below.groupby("month_name")["point_label"]
+            .apply(lambda s: ", ".join(sorted(set(s))[:4]) + (" …" if len(set(s)) > 4 else ""))
+            .reindex(MONTH_NAMES)
+            .dropna()
+        )
+        st.warning("Måneder med lav dekning: " + ", ".join([m for m in bad_months.index.tolist() if m]))
+
+    # Coverage per point heatmap/table
+    st.markdown("### Dekning per målepunkt")
+    cov_piv = coverage_pivot(metrics)
+    if not cov_piv.empty:
+        cov_long = cov_piv.reset_index().melt(id_vars=["month_name"], var_name="Målepunkt", value_name="Dekning")
+        cov_long = cov_long.dropna(subset=["Dekning"])
+        chart = (
+            alt.Chart(cov_long)
+            .mark_rect()
+            .encode(
+                x=alt.X("month_name:N", sort=MONTH_NAMES, title="Måned"),
+                y=alt.Y("Målepunkt:N", title="Målepunkt"),
+                color=alt.Color("Dekning:Q", scale=alt.Scale(domain=[0, 100], scheme="yellowgreenblue"), title="Dekning (%)"),
+                tooltip=[
+                    alt.Tooltip("Målepunkt:N"),
+                    alt.Tooltip("month_name:N", title="Måned"),
+                    alt.Tooltip("Dekning:Q", format=".1f", title="Dekning (%)"),
+                ],
+            )
+            .properties(height=min(420, 24 * max(1, len(cov_piv.columns))), title="Dekning per måned og målepunkt")
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+        with st.expander("📋 Dekningstabell"):
+            st.dataframe(cov_piv.round(1), use_container_width=True)
+
+    # Group coverage (Ryfast breakdown)
+    if point == "Ryfast (sum tunneler)":
+        st.markdown("### Dekning per tunnel")
+        point_ids_by_group = {
+            "Ryfylketunnelen": TRAFFIC_POINTS["Ryfylketunnelen"]["ids"],
+            "Hundvågtunnelen": (
+                TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
+                if st.session_state.get("ryfast_include_ramp", True)
+                else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
+            ),
+        }
+        grouped = group_coverage_by_month(metrics, point_ids_by_group)
+        if not grouped.empty:
+            chart = (
+                alt.Chart(grouped)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("month_name:N", sort=MONTH_NAMES, title="Måned"),
+                    y=alt.Y("coverage_pct:Q", title="Dekning (%)", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color("group:N", title="Tunnel"),
+                    tooltip=[
+                        alt.Tooltip("group:N", title="Tunnel"),
+                        alt.Tooltip("month_name:N", title="Måned"),
+                        alt.Tooltip("coverage_pct:Q", format=".1f", title="Dekning (%)"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+    st.markdown("### Usikkerhet (indikativ)")
+    st.caption(
+        "Konfidensintervaller er oppgitt per målepunkt. Vi summerer bounds på tvers av punkt for å gi et "
+        "indikativt spenn (ikke et strengt statistisk intervall)."
+    )
+    totals_ci = totals_with_uncertainty_from_metrics(metrics)
+    if not totals_ci.empty:
+        totals_ci["total"] = totals_ci["total"].round(0).astype("Int64")
+        totals_ci["total_lower"] = totals_ci["total_lower"].round(0).astype("Int64")
+        totals_ci["total_upper"] = totals_ci["total_upper"].round(0).astype("Int64")
+        display = totals_ci[["month_name", "total", "total_lower", "total_upper", "coverage_pct"]].copy()
+        display["coverage_pct"] = display["coverage_pct"].round(1)
+        display.columns = ["Måned", "Totalt", "Nedre", "Øvre", "Dekning (%)"]
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+
 def main():
     init_session_state()
 
@@ -946,6 +1420,7 @@ def main():
         with st.expander("🔧 Avanserte innstillinger"):
             use_cache = st.checkbox("Bruk hurtigbuffer", value=True, key="use_cache")
             timeout_s = st.slider("API timeout (sekunder)", 10, 90, 60, key="timeout_s")
+            coverage_threshold = st.slider("Min. dekning (%)", 50, 100, 90, key="coverage_threshold")
 
         include_ramp = True
         direction = "Begge retninger"
@@ -1049,6 +1524,7 @@ def main():
                     "point_ids": point_ids,
                     "timeout_s": timeout_s,
                     "use_cache": use_cache,
+                    "coverage_threshold": coverage_threshold,
                 }
 
     if not st.session_state.last_result:
@@ -1065,8 +1541,9 @@ def main():
     point_ids = result["point_ids"]
     timeout_s = result["timeout_s"]
     use_cache = result["use_cache"]
+    coverage_threshold = result.get("coverage_threshold", 90)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Visualisering", "📊 Data", "🧮 Totaltall", "📄 Rapport"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport"])
 
     with tab1:
         st.subheader(title)
@@ -1084,6 +1561,18 @@ def main():
         render_totals_tab(df, point, comparison_mode, year_list, year, point_ids, timeout_s, use_cache)
 
     with tab4:
+        render_data_quality_tab(
+            point=point,
+            comparison_mode=comparison_mode,
+            year_list=year_list,
+            year=year,
+            point_ids=point_ids,
+            timeout_s=timeout_s,
+            use_cache=use_cache,
+            coverage_threshold=float(coverage_threshold),
+        )
+
+    with tab5:
         st.subheader("📄 Rapport / eksport")
         create_export_section(df, point)
 

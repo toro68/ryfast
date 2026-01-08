@@ -41,3 +41,4 @@ tzdata==2024.1
 urllib3==2.6.3
 watchdog==4.0.1
 fpdf2==2.7.9
+kaleido==0.2.1
