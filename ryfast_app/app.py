@@ -506,7 +506,7 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
         year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
         if len(year_columns) > 1 and "Month Name" in df.columns:
             heatmap_data = df[["Month Name"] + year_columns].set_index("Month Name")
-            heatmap_data = heatmap_data.apply(pd.to_numeric, errors="coerce")
+            heatmap_data = heatmap_data.apply(pd.to_numeric, errors="coerce").astype(float)
             fig = px.imshow(
                 heatmap_data.T,
                 aspect="auto",
@@ -531,7 +531,7 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
             id_vars = []
 
         melted = df.melt(id_vars=id_vars, value_vars=year_columns, var_name="År", value_name="Trafikk")
-        melted["Trafikk"] = pd.to_numeric(melted["Trafikk"], errors="coerce")
+        melted["Trafikk"] = pd.to_numeric(melted["Trafikk"], errors="coerce").astype(float)
         melted = melted.dropna(subset=["Trafikk"])
         if melted.empty:
             return create_advanced_visualization(df, point, "line")
@@ -599,7 +599,8 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
     with col2:
         show_growth = st.checkbox("Vis vekstrater", value=False)
 
-    st.plotly_chart(create_advanced_visualization(df, point, chart_type), use_container_width=True)
+    fig = create_advanced_visualization(df, point, chart_type)
+    st.plotly_chart(fig, use_container_width=True, key=f"main_chart_{chart_type}")
 
     if show_growth:
         growth_df = calculate_growth_rates(df)
@@ -619,7 +620,7 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
             growth_melted = growth_df.melt(id_vars=id_vars, value_vars=growth_columns, var_name="Periode", value_name="Vekst (%)")
             fig_growth = px.bar(growth_melted, x=x_col, y="Vekst (%)", color="Periode", title="År-til-år vekstrater")
             fig_growth.add_hline(y=0, line_dash="dash", line_color="black")
-            st.plotly_chart(fig_growth, use_container_width=True)
+            st.plotly_chart(fig_growth, use_container_width=True, key="growth_chart")
 
 
 def process_data_for_years(point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool) -> pd.DataFrame:
