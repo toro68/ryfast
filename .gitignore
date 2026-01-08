@@ -1,11 +1,29 @@
+# macOS
 .DS_Store
-__pycache__/
-*.pyc
 
-# Local virtualenv (repo currently contains `myenv/`; ignore untracked additions)
-myenv/**/__pycache__/
-myenv/**/*.pyc
-myenv/lib/python*/site-packages/openpyxl/
-myenv/lib/python*/site-packages/openpyxl-*.dist-info/
-myenv/lib/python*/site-packages/et_xmlfile/
-myenv/lib/python*/site-packages/et_xmlfile-*.dist-info/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+myenv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# Local data exports
+totals_*.csv
