@@ -1,0 +1,7 @@
+[MAIN]
+ignore=.venv,myenv,venv,env,__pycache__
+
+[MESSAGES CONTROL]
+disable=
+    broad-exception-caught
+

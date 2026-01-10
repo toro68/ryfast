@@ -1,0 +1,14 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+  ".venv",
+  "venv",
+  "env",
+  "myenv",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"ryfast_app/app.py" = ["BLE001"]
+"scripts/*.py" = ["BLE001"]
+"compare_vegvesen_ferde.py" = ["BLE001"]

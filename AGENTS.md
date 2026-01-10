@@ -7,7 +7,7 @@
 - `scripts/debug_api.py`: Small script for troubleshooting API connectivity/response time.
 - `docs/`: Input/output artifacts (e.g. `*.xlsx`, exported `*.csv`, markdown analyses).
 - `requirements.txt`: Python dependencies.
-- Virtualenvs are local-only: use `.venv/` (preferred) or `myenv/`, and never commit them.
+- Virtualenvs are local-only: use `.venv/` and never commit it.
 
 ## Build, Test, and Development Commands
 
@@ -42,4 +42,4 @@ Notes:
 
 ## Agent-Specific Notes
 
-- Do not commit generated data, caches, or virtualenv directories (`.venv/`, `myenv/`, `__pycache__/`).
+- Do not commit generated data, caches, or virtualenv directories (`.venv/`, `__pycache__/`).

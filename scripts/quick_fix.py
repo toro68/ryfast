@@ -53,13 +53,12 @@ def show_fix_instructions():
     with st.expander("🔧 Slik fikser du det:"):
         st.code("""
 # I terminal:
-cd /Users/tor.inge.jossang@aftenbladet.no/dev/ryfast
-source myenv/bin/activate
-pip install openpyxl==3.1.5
+cd /Users/tor.inge.jossang@aftenbladet.no/dev/sa-ryfast
+source .venv/bin/activate
+python -m pip install openpyxl==3.1.5
 
 # Eller kjør install-scriptet:
-chmod +x install_missing.sh
-./install_missing.sh
+bash install_missing.sh
         """)
         
         st.info("💡 Alternativt kan du bruke CSV-export i stedet for Excel")
