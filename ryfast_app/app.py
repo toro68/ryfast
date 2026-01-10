@@ -65,6 +65,7 @@ TRAFFIC_POINTS = {
 }
 
 HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE = ["10239V2725979", "92743V2726085"]
+HUNDVAG_TUNNEL_RAMP_IDS = ["62464V2725991", "25926V2725990"]
 
 MONTH_NAMES = [
     "Januar",
@@ -2135,14 +2136,18 @@ def main():
 
         include_ramp = True
         direction = "Begge retninger"
-        if point == "Ryfast (sum tunneler)":
-            include_ramp = st.checkbox(
-                "Inkluder pårampe i Hundvågtunnelen",
-                value=True,
-                key="ryfast_include_ramp",
-                help="Når av, summeres kun hovedløpene (uten pårampe) for Hundvågtunnelen.",
-            )
-        elif point == "Bybrua":
+        has_optional_points = point in {"Ryfast (sum tunneler)", "Hundvågtunnelen"}
+        include_ramp = st.checkbox(
+            "Inkluder pårampe/tilleggspunkt (der definert)",
+            value=bool(st.session_state.get("ryfast_include_ramp", True)),
+            key="ryfast_include_ramp",
+            disabled=not has_optional_points,
+            help=(
+                "Når av (der tilgjengelig), ekskluderes pårampe/tilleggspunkt for Hundvågtunnelen "
+                f"({', '.join(HUNDVAG_TUNNEL_RAMP_IDS)})."
+            ),
+        )
+        if point == "Bybrua":
             direction = st.selectbox("Velg retning", ["Begge retninger", "Mot nord", "Mot sør"], key="bybrua_direction")
 
         year_input = DEFAULT_YEARS
@@ -2181,7 +2186,7 @@ def main():
         if point == "Ryfylketunnelen":
             return TRAFFIC_POINTS["Ryfylketunnelen"]["ids"]
         if point == "Hundvågtunnelen":
-            return TRAFFIC_POINTS["Hundvågtunnelen"]["ids"]
+            return TRAFFIC_POINTS["Hundvågtunnelen"]["ids"] if include_ramp else HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE
         if direction == "Begge retninger":
             return TRAFFIC_POINTS["Bybrua"]["ids"]["Mot nord"] + TRAFFIC_POINTS["Bybrua"]["ids"]["Mot sør"]
         return TRAFFIC_POINTS["Bybrua"]["ids"][direction]
