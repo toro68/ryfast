@@ -670,21 +670,39 @@ def build_pdf_report(
     use_cache: bool,
     coverage_threshold: float,
 ) -> bytes:
+    def pdf_safe_text(text: str) -> str:
+        replacements = {
+            "\u2013": "-",  # en dash
+            "\u2014": "-",  # em dash
+            "\u2212": "-",  # minus sign
+            "\u00a0": " ",  # nbsp
+            "\u2018": "'",  # left single quote
+            "\u2019": "'",  # right single quote
+            "\u201c": '"',  # left double quote
+            "\u201d": '"',  # right double quote
+            "\u2026": "...",  # ellipsis
+        }
+        for src, dst in replacements.items():
+            text = text.replace(src, dst)
+        return text.encode("latin-1", errors="replace").decode("latin-1")
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Ryfast - rapport", ln=True)
+    pdf.cell(0, 10, pdf_safe_text("Ryfast - rapport"), ln=True)
     pdf.set_font("Helvetica", "", 11)
     pdf.multi_cell(
         0,
         6,
-        f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Målepunkt: {point}\n"
-        f"Analysetype: {comparison_mode}\n"
-        f"År: {','.join(map(str, year_list)) if comparison_mode == 'Sammenlign år' else str(year)}\n"
-        f"Min. dekning: {coverage_threshold:.0f}%\n"
-        f"Punkt-IDer: {', '.join(point_ids)}",
+        pdf_safe_text(
+            f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Målepunkt: {point}\n"
+            f"Analysetype: {comparison_mode}\n"
+            f"År: {','.join(map(str, year_list)) if comparison_mode == 'Sammenlign år' else str(year)}\n"
+            f"Min. dekning: {coverage_threshold:.0f}%\n"
+            f"Punkt-IDer: {', '.join(point_ids)}"
+        ),
     )
 
     if comparison_mode != "Sammenlign uker":
@@ -737,7 +755,12 @@ def build_pdf_report(
         if not totals_ci.empty:
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 12)
-            pdf.cell(0, 8, f"Totale passeringer (indikativ usikkerhet) - {selected_year}", ln=True)
+            pdf.cell(
+                0,
+                8,
+                pdf_safe_text(f"Totale passeringer (indikativ usikkerhet) - {selected_year}"),
+                ln=True,
+            )
             pdf.set_font("Helvetica", "", 10)
             for _, r in totals_ci.iterrows():
                 if pd.isna(r["total"]):
@@ -745,13 +768,16 @@ def build_pdf_report(
                 pdf.cell(
                     0,
                     6,
-                    f"{r['month_name']}: {int(round(r['total'])):,}  "
-                    f"[{int(round(r['total_lower'])):,} – {int(round(r['total_upper'])):,}]  "
-                    f"dekning {r['coverage_pct']:.1f}%",
+                    pdf_safe_text(
+                        f"{r['month_name']}: {int(round(r['total'])):,}  "
+                        f"[{int(round(r['total_lower'])):,} – {int(round(r['total_upper'])):,}]  "
+                        f"dekning {r['coverage_pct']:.1f}%"
+                    ),
                     ln=True,
                 )
 
-    return pdf.output(dest="S").encode("latin-1")
+    output = pdf.output(dest="S")
+    return bytes(output) if isinstance(output, (bytes, bytearray)) else output.encode("latin-1")
 
 
 def create_export_section(df: pd.DataFrame, point: str):
