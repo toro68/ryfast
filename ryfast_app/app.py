@@ -86,6 +86,7 @@ YEAR_RANGE = range(2019, 2027)
 API_MAX_RETRIES = 3
 API_RETRY_DELAY = 1
 API_CACHE_TTL = 24 * 3600
+FULL_COVERAGE_TOL_PCT = 0.05  # tolerance to avoid float noise around 100%
 
 QUERY_TEMPLATE = """
 query {{
@@ -245,11 +246,12 @@ def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, us
 
 def fetch_weekly_traffic_data(
     point_ids: List[str], year: int, week_numbers: List[int], timeout_s: int, use_cache: bool
-) -> Dict[str, Dict[str, float]]:
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
     if year < 2019:
-        return {}
+        return {}, {}
 
     result: Dict[str, Dict[str, float]] = {}
+    cov_result: Dict[str, Dict[str, float]] = {}
     for week_num in week_numbers:
         try:
             jan_1 = datetime(year, 1, 1)
@@ -265,6 +267,7 @@ def fetch_weekly_traffic_data(
             to_date = week_end.strftime("%Y-%m-%dT23:59:59+01:00")
 
             week_data: Dict[str, float] = {}
+            week_cov: Dict[str, float] = {}
             for point_id in point_ids:
                 query = WEEKLY_QUERY_TEMPLATE.format(point_id=point_id, from_date=from_date, to_date=to_date)
                 data = fetch_data(query, timeout_s, use_cache)
@@ -272,32 +275,44 @@ def fetch_weekly_traffic_data(
                     edges = data["data"]["trafficData"]["volume"]["byDay"]["edges"] or []
                     total_volume = 0.0
                     valid_days = 0
+                    cov_sum = 0.0
+                    cov_days = 0
                     for edge in edges:
                         volume = edge["node"]["total"]["volumeNumbers"]["volume"]
                         if volume is not None:
                             total_volume += float(volume)
                             valid_days += 1
+                        cov = edge["node"]["total"]["coverage"]["percentage"]
+                        if cov is not None:
+                            cov_sum += float(cov)
+                            cov_days += 1
                     if valid_days:
                         week_data[point_id] = total_volume / valid_days
+                    if cov_days:
+                        week_cov[point_id] = cov_sum / cov_days
             if week_data:
                 result[f"Uke {week_num}"] = week_data
+            if week_cov:
+                cov_result[f"Uke {week_num}"] = week_cov
         except Exception as e:
             logger.error("Feil ved henting av ukesdata for uke %s: %s", week_num, str(e))
-    return result
+    return result, cov_result
 
 
-def sum_traffic_data(traffic_data_dict: Dict[str, List[Dict]]) -> Tuple[List[float], List[Dict[str, float]]]:
+def sum_traffic_data(traffic_data_dict: Dict[str, List[Dict]]) -> Tuple[List[float], List[Dict[str, float]], List[bool]]:
     monthly_sums = [0.0] * 12
     monthly_confidence = [{"lower": 0.0, "upper": 0.0} for _ in range(12)]
+    monthly_has_data = [False] * 12
 
-    for point_data in traffic_data_dict.values():
-        for entry in point_data:
+    for point_data in (traffic_data_dict or {}).values():
+        for entry in point_data or []:
             month = int(entry.get("month") or 0)
             if not (1 <= month <= 12):
                 continue
             volume = entry.get("total", {}).get("volume", {}).get("average")
             if volume is None:
                 continue
+            monthly_has_data[month - 1] = True
             monthly_sums[month - 1] += float(volume)
             ci = entry.get("total", {}).get("volume", {}).get("confidenceInterval") or {}
             lb = ci.get("lowerBound")
@@ -306,7 +321,7 @@ def sum_traffic_data(traffic_data_dict: Dict[str, List[Dict]]) -> Tuple[List[flo
                 monthly_confidence[month - 1]["lower"] += float(lb)
                 monthly_confidence[month - 1]["upper"] += float(ub)
 
-    return monthly_sums, monthly_confidence
+    return monthly_sums, monthly_confidence, monthly_has_data
 
 
 def sum_weekly_traffic_data(weekly_data_dict: Dict[str, Dict[str, float]]) -> Dict[str, float]:
@@ -374,6 +389,80 @@ def extract_point_monthly_metrics(traffic_by_point: Dict[str, List[Dict]], year:
                     "ci_upper": float(ci["upperBound"]) if ci.get("upperBound") is not None else np.nan,
                 }
             )
+    return pd.DataFrame(rows)
+
+def compute_monthly_coverage_summary(
+    traffic_by_point: Dict[str, List[Dict]],
+    year: int,
+    expected_point_ids: List[str],
+) -> pd.DataFrame:
+    metrics = extract_point_monthly_metrics(traffic_by_point, year)
+    expected_points = len(expected_point_ids)
+
+    if metrics.empty:
+        return pd.DataFrame(
+            {
+                "year": [year] * 12,
+                "month": list(range(1, 13)),
+                "month_name": MONTH_NAMES,
+                "points_expected": [expected_points] * 12,
+                "points_present": [0] * 12,
+                "points_present_pct": [0.0] * 12,
+                "mean_coverage_pct": [np.nan] * 12,
+                "min_coverage_pct": [np.nan] * 12,
+            }
+        )
+
+    tmp = metrics[metrics["avg_daily"].notna()].copy()
+    grouped = (
+        tmp.groupby(["year", "month", "month_name"], as_index=False)
+        .agg(
+            points_present=("point_id", "nunique"),
+            mean_coverage_pct=("coverage_pct", "mean"),
+            min_coverage_pct=("coverage_pct", "min"),
+        )
+        .sort_values("month")
+    )
+    base = pd.DataFrame({"year": [year] * 12, "month": list(range(1, 13)), "month_name": MONTH_NAMES})
+    out = base.merge(grouped, on=["year", "month", "month_name"], how="left")
+    out["points_expected"] = expected_points
+    out["points_present"] = out["points_present"].fillna(0).astype(int)
+    out["points_present_pct"] = np.where(
+        expected_points > 0,
+        out["points_present"].astype(float) / float(expected_points) * 100.0,
+        np.nan,
+    )
+    return out
+
+
+def compute_weekly_coverage_summary(
+    weekly_data_by_point: Dict[str, Dict[str, float]],
+    weekly_cov_by_point: Dict[str, Dict[str, float]],
+    expected_point_ids: List[str],
+    year: int,
+) -> pd.DataFrame:
+    expected_points = len(expected_point_ids)
+    weeks = sorted(
+        {str(w) for w in (weekly_data_by_point or {}).keys()},
+        key=lambda s: int("".join([c for c in s if c.isdigit()]) or "0"),
+    )
+    rows: List[Dict[str, object]] = []
+    for week in weeks:
+        vols = (weekly_data_by_point or {}).get(week, {}) or {}
+        covs = (weekly_cov_by_point or {}).get(week, {}) or {}
+        points_present = len(vols)
+        cov_values = [float(v) for v in covs.values() if v is not None and not pd.isna(v)]
+        rows.append(
+            {
+                "year": year,
+                "week": week,
+                "points_expected": expected_points,
+                "points_present": points_present,
+                "points_present_pct": (points_present / expected_points * 100.0) if expected_points else np.nan,
+                "mean_coverage_pct": (sum(cov_values) / len(cov_values)) if cov_values else np.nan,
+                "min_coverage_pct": min(cov_values) if cov_values else np.nan,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -1248,7 +1337,7 @@ def build_pdf_report(
     return bytes(output) if isinstance(output, (bytes, bytearray)) else output.encode("latin-1")
 
 
-def create_export_section(df: pd.DataFrame, point: str):
+def create_export_section(df: pd.DataFrame, point: str, coverage_summary: Optional[pd.DataFrame] = None):
     st.subheader("📊 Eksporter data")
     col1, col2, col3 = st.columns(3)
 
@@ -1280,6 +1369,26 @@ def create_export_section(df: pd.DataFrame, point: str):
             )
         else:
             st.caption("Excel-export krever `openpyxl`.")
+
+    if coverage_summary is not None and not coverage_summary.empty:
+        st.markdown("#### 🛡️ Eksporter dekning")
+        c1, c2 = st.columns(2)
+        with c1:
+            cov_csv = coverage_summary.to_csv(index=False, sep=";", encoding="utf-8")
+            st.download_button(
+                label="📁 Last ned dekning (CSV)",
+                data=cov_csv,
+                file_name=f"{point}_dekning_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+        with c2:
+            cov_json = coverage_summary.to_json(orient="records", indent=2)
+            st.download_button(
+                label="🔗 Last ned dekning (JSON)",
+                data=cov_json,
+                file_name=f"{point}_dekning_{datetime.now().strftime('%Y%m%d')}.json",
+                mime="application/json",
+            )
 
     st.markdown("### 📦 Ferdig rapport (anbefalt)")
     st.caption("Inkluderer metadata, data, dekning og (der mulig) grafer i Excel/PDF.")
@@ -1621,8 +1730,11 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
                 st.altair_chart((bars + zero).properties(title="År-til-år vekstrater"), use_container_width=True)
 
 
-def process_data_for_years(point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool) -> pd.DataFrame:
+def process_data_for_years(
+    point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     data: Dict[int, List[float]] = {}
+    coverage_rows: List[pd.DataFrame] = []
     progress_bar = st.progress(0)
     status_text = st.empty()
 
@@ -1631,8 +1743,9 @@ def process_data_for_years(point_ids: List[str], year_list: List[int], timeout_s
         progress_bar.progress((i + 1) / len(year_list))
         traffic_data_dict = fetch_batch_traffic_data(point_ids, year, timeout_s, use_cache)
         if traffic_data_dict:
-            monthly_sums, _ = sum_traffic_data(traffic_data_dict)
-            data[year] = monthly_sums
+            monthly_sums, _, monthly_has_data = sum_traffic_data(traffic_data_dict)
+            data[year] = [v if has else np.nan for v, has in zip(monthly_sums, monthly_has_data)]
+            coverage_rows.append(compute_monthly_coverage_summary(traffic_data_dict, year, point_ids))
 
     status_text.empty()
     progress_bar.empty()
@@ -1644,24 +1757,32 @@ def process_data_for_years(point_ids: List[str], year_list: List[int], timeout_s
     df = add_month_names(df)
     numeric_columns = df.select_dtypes(include=[np.number]).columns
     df[numeric_columns] = df[numeric_columns].round(0).astype("Int64")
-    return df
+    coverage_df = pd.concat(coverage_rows, ignore_index=True) if coverage_rows else pd.DataFrame()
+    return df, coverage_df
 
 
-def process_data_for_months(point_ids: List[str], year: int, months: List[int], timeout_s: int, use_cache: bool) -> Optional[pd.DataFrame]:
+def process_data_for_months(
+    point_ids: List[str], year: int, months: List[int], timeout_s: int, use_cache: bool
+) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
     traffic_data_dict = fetch_batch_traffic_data(point_ids, year, timeout_s, use_cache)
     if not traffic_data_dict:
         return None
-    data, _ = sum_traffic_data(traffic_data_dict)
+    data, _, monthly_has_data = sum_traffic_data(traffic_data_dict)
     df = pd.DataFrame({"Month": list(range(1, 13)), str(year): data})
+    df.loc[~pd.Series(monthly_has_data), str(year)] = np.nan
     df = df[df["Month"].isin(months)]
     df = add_month_names(df)
     numeric_columns = df.select_dtypes(include=[np.number]).columns
     df[numeric_columns] = df[numeric_columns].round(0).astype("Int64")
-    return df
+    coverage_df = compute_monthly_coverage_summary(traffic_data_dict, year, point_ids)
+    coverage_df = coverage_df[coverage_df["month"].isin(months)].copy()
+    return df, coverage_df
 
 
-def process_data_for_weeks(point_ids: List[str], year: int, weeks: List[int], timeout_s: int, use_cache: bool) -> Optional[pd.DataFrame]:
-    weekly_data_dict = fetch_weekly_traffic_data(point_ids, year, weeks, timeout_s, use_cache)
+def process_data_for_weeks(
+    point_ids: List[str], year: int, weeks: List[int], timeout_s: int, use_cache: bool
+) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
+    weekly_data_dict, weekly_cov_dict = fetch_weekly_traffic_data(point_ids, year, weeks, timeout_s, use_cache)
     if not weekly_data_dict:
         return None
     weekly_sums = sum_weekly_traffic_data(weekly_data_dict)
@@ -1669,7 +1790,101 @@ def process_data_for_weeks(point_ids: List[str], year: int, weeks: List[int], ti
     df["Week_Num"] = df["Week"].str.extract(r"(\d+)").astype(int)
     df = df.sort_values("Week_Num").drop(columns=["Week_Num"]).reset_index(drop=True)
     df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").round(0).astype("Int64")
-    return df
+    coverage_df = compute_weekly_coverage_summary(weekly_data_dict, weekly_cov_dict, point_ids, year)
+    return df, coverage_df
+
+
+def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
+    if coverage_df is None or coverage_df.empty:
+        return
+
+    tmp = coverage_df.copy()
+    tmp["has_issue"] = False
+    if "points_expected" in tmp.columns and "points_present" in tmp.columns:
+        tmp["has_issue"] |= tmp["points_present"] < tmp["points_expected"]
+    if "mean_coverage_pct" in tmp.columns:
+        tmp["has_issue"] |= tmp["mean_coverage_pct"].notna() & (tmp["mean_coverage_pct"] < (100.0 - FULL_COVERAGE_TOL_PCT))
+    if "min_coverage_pct" in tmp.columns:
+        tmp["has_issue"] |= tmp["min_coverage_pct"].notna() & (tmp["min_coverage_pct"] < (100.0 - FULL_COVERAGE_TOL_PCT))
+
+    issues = tmp[tmp["has_issue"]].copy()
+    if issues.empty:
+        st.success("✅ 100% datadekning i perioden som vises (ingen manglende punkter og 100% rapportert dekning).")
+        return
+
+    def _labels(sub: pd.DataFrame) -> List[str]:
+        if "month_name" in sub.columns:
+            months = [m for m in MONTH_NAMES if m in set(sub["month_name"].astype(str))]
+            return months
+        if "week" in sub.columns:
+            return sub["week"].astype(str).tolist()
+        return []
+
+    if "year" in issues.columns and issues["year"].nunique() > 1:
+        parts = [f"{int(y)}: " + ", ".join(_labels(sub)) for y, sub in issues.groupby("year")]
+        st.warning("⚠️ Ikke 100% datadekning i: " + " | ".join(parts))
+    else:
+        st.warning("⚠️ Ikke 100% datadekning i: " + ", ".join(_labels(issues)))
+
+    with st.expander("🔎 Detaljer (dekning)", expanded=False):
+        try:
+            if "month_name" in coverage_df.columns and "mean_coverage_pct" in coverage_df.columns:
+                plot_df = coverage_df.dropna(subset=["mean_coverage_pct"]).copy()
+                if not plot_df.empty:
+                    plot_df["month_name"] = pd.Categorical(plot_df["month_name"], categories=MONTH_NAMES, ordered=True)
+                    color = alt.Color("year:N", title="År") if "year" in plot_df.columns and plot_df["year"].nunique() > 1 else alt.value("#1f77b4")
+                    tooltips = [
+                        alt.Tooltip("month_name:N", title="Måned"),
+                        alt.Tooltip("mean_coverage_pct:Q", format=".1f", title="Snitt dekning (%)"),
+                    ]
+                    if "year" in plot_df.columns:
+                        tooltips.insert(0, alt.Tooltip("year:N", title="År"))
+                    chart = (
+                        alt.Chart(plot_df)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X("month_name:N", sort=MONTH_NAMES, title="Måned"),
+                            y=alt.Y("mean_coverage_pct:Q", title="Snitt dekning (%)", scale=alt.Scale(domain=[0, 100])),
+                            color=color,
+                            tooltip=tooltips,
+                        )
+                        .properties(height=220)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+            elif "week" in coverage_df.columns and "mean_coverage_pct" in coverage_df.columns:
+                plot_df = coverage_df.dropna(subset=["mean_coverage_pct"]).copy()
+                if not plot_df.empty:
+                    week_order = sorted(plot_df["week"].astype(str).unique(), key=lambda s: int("".join([c for c in s if c.isdigit()]) or "0"))
+                    chart = (
+                        alt.Chart(plot_df)
+                        .mark_line(point=True, color="#1f77b4")
+                        .encode(
+                            x=alt.X("week:N", sort=week_order, title="Uke"),
+                            y=alt.Y("mean_coverage_pct:Q", title="Snitt dekning (%)", scale=alt.Scale(domain=[0, 100])),
+                            tooltip=[
+                                alt.Tooltip("week:N", title="Uke"),
+                                alt.Tooltip("mean_coverage_pct:Q", format=".1f", title="Snitt dekning (%)"),
+                            ],
+                        )
+                        .properties(height=220)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            pass
+
+        cols: List[str] = []
+        if "year" in coverage_df.columns:
+            cols.append("year")
+        if "month_name" in coverage_df.columns:
+            cols.append("month_name")
+        if "week" in coverage_df.columns:
+            cols.append("week")
+        cols += [c for c in ["points_present", "points_expected", "mean_coverage_pct", "min_coverage_pct"] if c in coverage_df.columns]
+        view = coverage_df[cols].copy()
+        for c in ["mean_coverage_pct", "min_coverage_pct", "points_present_pct"]:
+            if c in view.columns:
+                view[c] = pd.to_numeric(view[c], errors="coerce").round(1)
+        st.dataframe(view, use_container_width=True, hide_index=True)
 
 
 def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_list: List[int], year: int, point_ids: List[str], timeout_s: int, use_cache: bool):
@@ -1997,13 +2212,22 @@ def main():
         if (comparison_mode == "Sammenlign år" and year_list) or (comparison_mode != "Sammenlign år"):
             with st.spinner("🔄 Behandler data..."):
                 if comparison_mode == "Sammenlign år":
-                    df = process_data_for_years(point_ids, year_list, timeout_s, use_cache)
+                    result_tuple = process_data_for_years(point_ids, year_list, timeout_s, use_cache)
+                    df, coverage_summary = result_tuple
                     title = f"Årlig sammenligning for {point}"
                 elif comparison_mode == "Sammenlign måneder":
-                    df = process_data_for_months(point_ids, year, months, timeout_s, use_cache)
+                    result_tuple = process_data_for_months(point_ids, year, months, timeout_s, use_cache)
+                    if result_tuple is None:
+                        df, coverage_summary = None, pd.DataFrame()
+                    else:
+                        df, coverage_summary = result_tuple
                     title = f"Månedlig analyse for {point} i {year}"
                 else:
-                    df = process_data_for_weeks(point_ids, year, weeks, timeout_s, use_cache)
+                    result_tuple = process_data_for_weeks(point_ids, year, weeks, timeout_s, use_cache)
+                    if result_tuple is None:
+                        df, coverage_summary = None, pd.DataFrame()
+                    else:
+                        df, coverage_summary = result_tuple
                     title = f"Ukentlig analyse for {point} i {year}"
 
             if df is None or df.empty:
@@ -2012,6 +2236,7 @@ def main():
             else:
                 st.session_state.last_result = {
                     "df": df,
+                    "coverage_summary": coverage_summary,
                     "title": title,
                     "point": point,
                     "comparison_mode": comparison_mode,
@@ -2029,6 +2254,7 @@ def main():
 
     result = st.session_state.last_result
     df = result["df"]
+    coverage_summary = result.get("coverage_summary", pd.DataFrame())
     title = result["title"]
     point = result["point"]
     comparison_mode = result["comparison_mode"]
@@ -2043,6 +2269,7 @@ def main():
 
     with tab1:
         st.subheader(title)
+        render_data_coverage_banner(coverage_summary)
         create_comparison_dashboard(df, point)
 
     with tab2:
@@ -2052,6 +2279,13 @@ def main():
         for col in numeric_cols:
             formatted_df[col] = formatted_df[col].map(format_number)
         st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+        if coverage_summary is not None and not coverage_summary.empty:
+            with st.expander("🛡️ Datadekning (for perioden som vises)"):
+                cov_view = coverage_summary.copy()
+                for c in ["points_present_pct", "mean_coverage_pct", "min_coverage_pct"]:
+                    if c in cov_view.columns:
+                        cov_view[c] = pd.to_numeric(cov_view[c], errors="coerce").round(1)
+                st.dataframe(cov_view, use_container_width=True, hide_index=True)
 
     with tab3:
         render_totals_tab(df, point, comparison_mode, year_list, year, point_ids, timeout_s, use_cache)
@@ -2070,7 +2304,7 @@ def main():
 
     with tab5:
         st.subheader("📄 Rapport / eksport")
-        create_export_section(df, point)
+        create_export_section(df, point, coverage_summary=coverage_summary)
 
 
 if __name__ == "__main__":
