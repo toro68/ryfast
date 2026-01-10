@@ -16,16 +16,25 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from fpdf import FPDF
-from openpyxl import Workbook
-from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.formatting.rule import CellIsRule
-from openpyxl.styles import Alignment, Font, PatternFill
 
 try:
     import openpyxl  # noqa: F401
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import Alignment, Font, PatternFill
 
     OPENPYXL_AVAILABLE = True
 except Exception:
+    openpyxl = None  # type: ignore[assignment]
+    Workbook = None  # type: ignore[assignment]
+    BarChart = None  # type: ignore[assignment]
+    LineChart = None  # type: ignore[assignment]
+    Reference = None  # type: ignore[assignment]
+    CellIsRule = None  # type: ignore[assignment]
+    Alignment = None  # type: ignore[assignment]
+    Font = None  # type: ignore[assignment]
+    PatternFill = None  # type: ignore[assignment]
     OPENPYXL_AVAILABLE = False
 
 
@@ -88,6 +97,7 @@ API_MAX_RETRIES = 3
 API_RETRY_DELAY = 1
 API_CACHE_TTL = 24 * 3600
 FULL_COVERAGE_TOL_PCT = 0.05  # tolerance to avoid float noise around 100%
+ANOMALY_THRESHOLD_PCT = 20.0
 
 QUERY_TEMPLATE = """
 query {{
@@ -178,6 +188,36 @@ def init_session_state():
         st.session_state.comparison_history = []
     if "last_result" not in st.session_state:
         st.session_state.last_result = None
+    if "api_errors" not in st.session_state:
+        st.session_state.api_errors = []
+
+
+def record_api_error(message: str, query: Optional[str] = None) -> None:
+    try:
+        errors = list(st.session_state.get("api_errors", []))
+        errors.append(
+            {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "message": str(message),
+                "query": (query[:600] + "…") if query and len(query) > 600 else query,
+            }
+        )
+        st.session_state.api_errors = errors[-50:]
+    except Exception:
+        pass
+
+
+def render_api_status_sidebar() -> None:
+    errors = st.session_state.get("api_errors", []) or []
+    with st.sidebar.expander("🧾 API-feil / status", expanded=False):
+        if not errors:
+            st.caption("Ingen registrerte API-feil i denne sesjonen.")
+            return
+        st.warning(f"{len(errors)} API-feil registrert i denne sesjonen.")
+        if st.button("Tøm API-feil", type="secondary"):
+            st.session_state.api_errors = []
+            st.rerun()
+        st.dataframe(pd.DataFrame(errors).iloc[::-1], use_container_width=True, hide_index=True)
 
 
 def _fetch_data_uncached(query: str, timeout_s: int) -> Optional[Dict]:
@@ -188,14 +228,17 @@ def _fetch_data_uncached(query: str, timeout_s: int) -> Optional[Dict]:
             data = response.json()
             if "errors" in data:
                 logger.error("GraphQL errors: %s", data["errors"])
+                record_api_error(f"GraphQL error: {data['errors']}", query=query)
                 return None
             return data
         except requests.Timeout:
             logger.warning("Timeout on attempt %s/%s", attempt + 1, API_MAX_RETRIES)
+            record_api_error(f"Timeout (forsøk {attempt + 1}/{API_MAX_RETRIES})", query=query)
             if attempt == API_MAX_RETRIES - 1:
                 return None
         except requests.RequestException as e:
             logger.warning("Request failed on attempt %s/%s: %s", attempt + 1, API_MAX_RETRIES, str(e))
+            record_api_error(f"RequestException (forsøk {attempt + 1}/{API_MAX_RETRIES}): {e}", query=query)
             if attempt == API_MAX_RETRIES - 1:
                 return None
             time.sleep(API_RETRY_DELAY * (attempt + 1))
@@ -300,10 +343,16 @@ def fetch_weekly_traffic_data(
     return result, cov_result
 
 
-def sum_traffic_data(traffic_data_dict: Dict[str, List[Dict]]) -> Tuple[List[float], List[Dict[str, float]], List[bool]]:
+def sum_traffic_data(
+    traffic_data_dict: Dict[str, List[Dict]],
+    expected_point_ids: Optional[List[str]] = None,
+    estimate_missing_points: bool = False,
+) -> Tuple[List[float], List[Dict[str, float]], List[bool], List[int]]:
     monthly_sums = [0.0] * 12
     monthly_confidence = [{"lower": 0.0, "upper": 0.0} for _ in range(12)]
     monthly_has_data = [False] * 12
+    monthly_points_present = [0] * 12
+    expected_points = len(expected_point_ids or [])
 
     for point_data in (traffic_data_dict or {}).values():
         for entry in point_data or []:
@@ -315,6 +364,7 @@ def sum_traffic_data(traffic_data_dict: Dict[str, List[Dict]]) -> Tuple[List[flo
                 continue
             monthly_has_data[month - 1] = True
             monthly_sums[month - 1] += float(volume)
+            monthly_points_present[month - 1] += 1
             ci = entry.get("total", {}).get("volume", {}).get("confidenceInterval") or {}
             lb = ci.get("lowerBound")
             ub = ci.get("upperBound")
@@ -322,7 +372,53 @@ def sum_traffic_data(traffic_data_dict: Dict[str, List[Dict]]) -> Tuple[List[flo
                 monthly_confidence[month - 1]["lower"] += float(lb)
                 monthly_confidence[month - 1]["upper"] += float(ub)
 
-    return monthly_sums, monthly_confidence, monthly_has_data
+    if estimate_missing_points and expected_points:
+        for i in range(12):
+            present = monthly_points_present[i]
+            if present and present < expected_points:
+                monthly_sums[i] = monthly_sums[i] * (expected_points / present)
+                monthly_confidence[i]["lower"] = monthly_confidence[i]["lower"] * (expected_points / present)
+                monthly_confidence[i]["upper"] = monthly_confidence[i]["upper"] * (expected_points / present)
+
+    return monthly_sums, monthly_confidence, monthly_has_data, monthly_points_present
+
+
+def detect_monthly_anomalies(df: pd.DataFrame, threshold_pct: float = ANOMALY_THRESHOLD_PCT) -> pd.DataFrame:
+    if df is None or df.empty or "Month" not in df.columns:
+        return pd.DataFrame()
+    years = [c for c in df.columns if str(c).isdigit()]
+    if len(years) < 2:
+        return pd.DataFrame()
+
+    rows: List[Dict[str, object]] = []
+    for year_col in years:
+        other_cols = [c for c in years if c != year_col]
+        for _, r in df.iterrows():
+            month = int(r.get("Month", 0) or 0)
+            if not (1 <= month <= 12):
+                continue
+            actual = pd.to_numeric(r.get(year_col), errors="coerce")
+            if pd.isna(actual):
+                continue
+            expected = pd.to_numeric(pd.Series([r.get(c) for c in other_cols]), errors="coerce").median()
+            if pd.isna(expected) or expected == 0:
+                continue
+            deviation = (float(actual) - float(expected)) / float(expected) * 100.0
+            if abs(deviation) >= float(threshold_pct):
+                rows.append(
+                    {
+                        "year": int(year_col),
+                        "month": month,
+                        "month_name": MONTH_NAMES[month - 1],
+                        "actual": float(actual),
+                        "expected": float(expected),
+                        "deviation_pct": float(deviation),
+                    }
+                )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["year", "month"]).reset_index(drop=True)
 
 
 def sum_weekly_traffic_data(weekly_data_dict: Dict[str, Dict[str, float]]) -> Dict[str, float]:
@@ -654,6 +750,7 @@ def build_excel_report(
     use_cache: bool,
     coverage_threshold: float,
     ryfast_include_ramp: Optional[bool] = None,
+    estimate_missing_points: bool = False,
 ) -> bytes:
     if not OPENPYXL_AVAILABLE:
         raise ImportError("openpyxl is not available")
@@ -703,6 +800,7 @@ def build_excel_report(
         ("Timeout (s)", str(timeout_s)),
         ("Cache", "Ja" if use_cache else "Nei"),
         ("Min. dekning (%)", f"{coverage_threshold:.0f}"),
+        ("Estimer manglende punkt", "Ja" if estimate_missing_points else "Nei"),
     ]
     for i, (k, v) in enumerate(meta_rows, start=3):
         ws_meta[f"A{i}"] = k
@@ -1013,6 +1111,53 @@ def build_excel_report(
                 except Exception:
                     pass
 
+            # Data quality warnings
+            try:
+                warnings: List[Tuple[str, str, Optional[str]]] = []
+
+                cov_month = compute_monthly_coverage_summary(traffic_by_point, int(selected_year), point_ids)
+                missing_points = cov_month[(cov_month["points_present"] < cov_month["points_expected"]) & (cov_month["points_present"] > 0)]
+                for r in missing_points.itertuples(index=False):
+                    warnings.append(
+                        (
+                            "Manglende målepunkter",
+                            f"{int(r.year)} {str(r.month_name)}",
+                            f"{int(r.points_present)}/{int(r.points_expected)} punkter med data",
+                        )
+                    )
+                none_points = cov_month[cov_month["points_present"] == 0]
+                for r in none_points.itertuples(index=False):
+                    warnings.append(("Ingen data", f"{int(r.year)} {str(r.month_name)}", None))
+
+                anomalies = detect_monthly_anomalies(df, threshold_pct=float(ANOMALY_THRESHOLD_PCT))
+                for r in anomalies.itertuples(index=False):
+                    warnings.append(
+                        (
+                            "Anomali",
+                            f"{int(r.year)} {str(r.month_name)}",
+                            f"Avvik {float(r.deviation_pct):+.1f}% (faktisk {int(round(float(r.actual))):,} / forventet {int(round(float(r.expected))):,})".replace(
+                                ",", " "
+                            ),
+                        )
+                    )
+
+                if warnings:
+                    ws_warn = wb.create_sheet("Warnings")
+                    ws_warn.append(["Type", "Periode", "Detalj"])
+                    style_header_row(ws_warn, row=1)
+                    for t, period, detail in warnings:
+                        ws_warn.append([t, period, detail])
+                    ws_warn.freeze_panes = "A2"
+                    ws_warn.auto_filter.ref = ws_warn.dimensions
+                    ws_warn.column_dimensions["A"].width = 22
+                    ws_warn.column_dimensions["B"].width = 18
+                    ws_warn.column_dimensions["C"].width = 70
+
+                    ws_summary["A7"] = f"Varsler: {len(warnings)} (se fanen 'Warnings')"
+                    ws_summary["A7"].alignment = wrap_top
+            except Exception:
+                pass
+
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
@@ -1029,6 +1174,7 @@ def build_pdf_report(
     use_cache: bool,
     coverage_threshold: float,
     ryfast_include_ramp: Optional[bool] = None,
+    estimate_missing_points: bool = False,
 ) -> bytes:
     def pdf_safe_text(text: str) -> str:
         replacements = {
@@ -1065,6 +1211,7 @@ def build_pdf_report(
             f"Analysetype: {comparison_mode}\n"
             f"År: {','.join(map(str, year_list)) if comparison_mode == 'Sammenlign år' else str(year)}\n"
             f"Min. dekning: {coverage_threshold:.0f}%\n"
+            f"Estimer manglende punkt: {'Ja' if estimate_missing_points else 'Nei'}\n"
             f"Punkt-IDer: {', '.join(point_ids)}"
         ),
     )
@@ -1334,6 +1481,35 @@ def build_pdf_report(
             except Exception:
                 pass
 
+        # Data quality warnings
+        try:
+            warnings: List[str] = []
+            cov_month = compute_monthly_coverage_summary(traffic_by_point, int(selected_year), point_ids)
+            missing_months = cov_month[(cov_month["points_present"] < cov_month["points_expected"]) & (cov_month["points_present"] > 0)][
+                "month_name"
+            ].tolist()
+            if missing_months:
+                warnings.append("Manglende målepunkter: " + ", ".join([m for m in MONTH_NAMES if m in set(missing_months)]))
+
+            none_months = cov_month[cov_month["points_present"] == 0]["month_name"].tolist()
+            if none_months:
+                warnings.append("Ingen data: " + ", ".join([m for m in MONTH_NAMES if m in set(none_months)]))
+
+            anomalies = detect_monthly_anomalies(df, threshold_pct=float(ANOMALY_THRESHOLD_PCT))
+            if not anomalies.empty:
+                for r in anomalies.itertuples(index=False):
+                    warnings.append(f"Anomali {int(r.year)} {str(r.month_name)}: {float(r.deviation_pct):+.1f}%")
+
+            if warnings:
+                pdf.ln(2)
+                pdf.set_font("Helvetica", "B", 12)
+                pdf.cell(0, 8, pdf_safe_text("Data Quality Warnings"), ln=True)
+                pdf.set_font("Helvetica", "", 10)
+                for w in warnings[:15]:
+                    pdf.multi_cell(0, 5, pdf_safe_text(f"- {w}"))
+        except Exception:
+            pass
+
     output = pdf.output(dest="S")
     return bytes(output) if isinstance(output, (bytes, bytearray)) else output.encode("latin-1")
 
@@ -1408,6 +1584,7 @@ def create_export_section(df: pd.DataFrame, point: str, coverage_summary: Option
                 use_cache=bool(result.get("use_cache", True)),
                 coverage_threshold=float(result.get("coverage_threshold", 90)),
                 ryfast_include_ramp=bool(st.session_state.get("ryfast_include_ramp", True)),
+                estimate_missing_points=bool(result.get("estimate_missing_points", False)),
             )
             st.download_button(
                 "⬇️ Last ned Excel-rapport",
@@ -1429,6 +1606,7 @@ def create_export_section(df: pd.DataFrame, point: str, coverage_summary: Option
                 use_cache=bool(result.get("use_cache", True)),
                 coverage_threshold=float(result.get("coverage_threshold", 90)),
                 ryfast_include_ramp=bool(st.session_state.get("ryfast_include_ramp", True)),
+                estimate_missing_points=bool(result.get("estimate_missing_points", False)),
             )
             st.download_button(
                 "⬇️ Last ned PDF-rapport",
@@ -1732,7 +1910,7 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
 
 
 def process_data_for_years(
-    point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool
+    point_ids: List[str], year_list: List[int], timeout_s: int, use_cache: bool, estimate_missing_points: bool
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     data: Dict[int, List[float]] = {}
     coverage_rows: List[pd.DataFrame] = []
@@ -1744,7 +1922,11 @@ def process_data_for_years(
         progress_bar.progress((i + 1) / len(year_list))
         traffic_data_dict = fetch_batch_traffic_data(point_ids, year, timeout_s, use_cache)
         if traffic_data_dict:
-            monthly_sums, _, monthly_has_data = sum_traffic_data(traffic_data_dict)
+            monthly_sums, _, monthly_has_data, _ = sum_traffic_data(
+                traffic_data_dict,
+                expected_point_ids=point_ids,
+                estimate_missing_points=estimate_missing_points,
+            )
             data[year] = [v if has else np.nan for v, has in zip(monthly_sums, monthly_has_data)]
             coverage_rows.append(compute_monthly_coverage_summary(traffic_data_dict, year, point_ids))
 
@@ -1763,12 +1945,16 @@ def process_data_for_years(
 
 
 def process_data_for_months(
-    point_ids: List[str], year: int, months: List[int], timeout_s: int, use_cache: bool
+    point_ids: List[str], year: int, months: List[int], timeout_s: int, use_cache: bool, estimate_missing_points: bool
 ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
     traffic_data_dict = fetch_batch_traffic_data(point_ids, year, timeout_s, use_cache)
     if not traffic_data_dict:
         return None
-    data, _, monthly_has_data = sum_traffic_data(traffic_data_dict)
+    data, _, monthly_has_data, _ = sum_traffic_data(
+        traffic_data_dict,
+        expected_point_ids=point_ids,
+        estimate_missing_points=estimate_missing_points,
+    )
     df = pd.DataFrame({"Month": list(range(1, 13)), str(year): data})
     df.loc[~pd.Series(monthly_has_data), str(year)] = np.nan
     df = df[df["Month"].isin(months)]
@@ -1804,13 +1990,39 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
     if "points_expected" in tmp.columns and "points_present" in tmp.columns:
         tmp["has_issue"] |= tmp["points_present"] < tmp["points_expected"]
     if "mean_coverage_pct" in tmp.columns:
-        tmp["has_issue"] |= tmp["mean_coverage_pct"].notna() & (tmp["mean_coverage_pct"] < (100.0 - FULL_COVERAGE_TOL_PCT))
+        tmp["has_issue"] |= tmp["mean_coverage_pct"].notna() & (
+            tmp["mean_coverage_pct"] < (100.0 - FULL_COVERAGE_TOL_PCT)
+        )
     if "min_coverage_pct" in tmp.columns:
         tmp["has_issue"] |= tmp["min_coverage_pct"].notna() & (tmp["min_coverage_pct"] < (100.0 - FULL_COVERAGE_TOL_PCT))
 
     issues = tmp[tmp["has_issue"]].copy()
+
+    expected = int(tmp["points_expected"].dropna().iloc[0]) if "points_expected" in tmp.columns and tmp["points_expected"].notna().any() else 0
+    present_min = int(tmp["points_present"].min()) if "points_present" in tmp.columns and tmp["points_present"].notna().any() else 0
+    present_avg = float(tmp["points_present"].mean()) if "points_present" in tmp.columns and tmp["points_present"].notna().any() else float("nan")
+    missing_periods = int((tmp["points_present"] < tmp["points_expected"]).sum()) if {"points_present", "points_expected"} <= set(tmp.columns) else 0
+    periods_total = int(len(tmp))
+
+    mean_cov = float(tmp["mean_coverage_pct"].mean()) if "mean_coverage_pct" in tmp.columns and tmp["mean_coverage_pct"].notna().any() else float("nan")
+    min_cov = float(tmp["min_coverage_pct"].min()) if "min_coverage_pct" in tmp.columns and tmp["min_coverage_pct"].notna().any() else float("nan")
+
+    point_cov_text = (
+        f"**Punktdekning:** min {present_min}/{expected} punkter rapporterer"
+        + (f" (snitt {present_avg:.1f}/{expected})" if expected and present_avg == present_avg else "")
+        + (f" — mangler i {missing_periods}/{periods_total} perioder" if periods_total else "")
+    )
+    data_cov_text = "**Datadekning:** "
+    if mean_cov == mean_cov:
+        data_cov_text += f"snitt {mean_cov:.1f}%"
+        if min_cov == min_cov:
+            data_cov_text += f", min {min_cov:.1f}%"
+        data_cov_text += " (på rapporterende punkter)"
+    else:
+        data_cov_text += "N/A"
+
     if issues.empty:
-        st.success("✅ 100% datadekning i perioden som vises (ingen manglende punkter og 100% rapportert dekning).")
+        st.success("✅ 100% i perioden som vises\n\n" + point_cov_text + "\n\n" + data_cov_text)
         return
 
     def _labels(sub: pd.DataFrame) -> List[str]:
@@ -1823,9 +2035,11 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
 
     if "year" in issues.columns and issues["year"].nunique() > 1:
         parts = [f"{int(y)}: " + ", ".join(_labels(sub)) for y, sub in issues.groupby("year")]
-        st.warning("⚠️ Ikke 100% datadekning i: " + " | ".join(parts))
+        where = " | ".join(parts)
     else:
-        st.warning("⚠️ Ikke 100% datadekning i: " + ", ".join(_labels(issues)))
+        where = ", ".join(_labels(issues))
+
+    st.warning("⚠️ Ikke 100% i perioden som vises\n\n" + point_cov_text + "\n\n" + data_cov_text + "\n\n" + f"**Perioder:** {where}")
 
     with st.expander("🔎 Detaljer (dekning)", expanded=False):
         try:
@@ -1886,6 +2100,28 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
             if c in view.columns:
                 view[c] = pd.to_numeric(view[c], errors="coerce").round(1)
         st.dataframe(view, use_container_width=True, hide_index=True)
+
+
+def render_anomaly_banner(df: pd.DataFrame) -> None:
+    anomalies = detect_monthly_anomalies(df, threshold_pct=float(ANOMALY_THRESHOLD_PCT))
+    if anomalies is None or anomalies.empty:
+        return
+    preview = anomalies.sort_values(["year", "month"]).head(6)
+    items = [f"{int(r.year)} {str(r.month_name)} ({float(r.deviation_pct):+.0f}%)" for r in preview.itertuples(index=False)]
+    st.warning("⚠️ Mulige anomalier: " + ", ".join(items) + (" …" if len(anomalies) > len(preview) else ""))
+
+
+def render_point_basis_note(coverage_df: pd.DataFrame) -> None:
+    if coverage_df is None or coverage_df.empty:
+        return
+    if not {"points_present", "points_expected"} <= set(coverage_df.columns):
+        return
+    expected = int(coverage_df["points_expected"].dropna().iloc[0]) if coverage_df["points_expected"].notna().any() else 0
+    if not expected:
+        return
+    present_min = int(coverage_df["points_present"].min()) if coverage_df["points_present"].notna().any() else 0
+    if present_min < expected:
+        st.caption(f"⚠️ Grafene kan være basert på ufullstendige målepunkter (min {present_min}/{expected} rapporterer i perioden).")
 
 
 def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_list: List[int], year: int, point_ids: List[str], timeout_s: int, use_cache: bool):
@@ -1973,6 +2209,8 @@ def render_data_quality_tab(
     timeout_s: int,
     use_cache: bool,
     coverage_threshold: float,
+    df: Optional[pd.DataFrame] = None,
+    coverage_summary: Optional[pd.DataFrame] = None,
 ):
     st.subheader("🛡️ Dekning og datakvalitet")
     st.caption(
@@ -1981,7 +2219,52 @@ def render_data_quality_tab(
     )
 
     if comparison_mode == "Sammenlign uker":
-        st.info("Datakvalitet for ukesvisning kommer (krever egen aggregering av dekning per dag/uke).")
+        cov = coverage_summary if coverage_summary is not None else pd.DataFrame()
+        if cov is None or cov.empty:
+            st.warning("Fant ingen dekningsdata for ukesvisning.")
+            return
+
+        below_cov = cov[(cov["mean_coverage_pct"].notna()) & (cov["mean_coverage_pct"] < float(coverage_threshold))]
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("Dekningsterskel", f"{coverage_threshold:.0f}%")
+        with m2:
+            st.metric("Uker under terskel", str(len(below_cov)))
+        with m3:
+            st.metric(
+                "Snitt dekning",
+                f"{cov['mean_coverage_pct'].mean():.1f}%" if cov["mean_coverage_pct"].notna().any() else "N/A",
+            )
+
+        st.markdown("### Ukentlig dekning")
+        try:
+            plot_df = cov.dropna(subset=["mean_coverage_pct"]).copy()
+            if not plot_df.empty:
+                week_order = sorted(
+                    plot_df["week"].astype(str).unique(),
+                    key=lambda s: int("".join([c for c in s if c.isdigit()]) or "0"),
+                )
+                chart = (
+                    alt.Chart(plot_df)
+                    .mark_line(point=True, color="#1f77b4")
+                    .encode(
+                        x=alt.X("week:N", sort=week_order, title="Uke"),
+                        y=alt.Y("mean_coverage_pct:Q", title="Snitt dekning (%)", scale=alt.Scale(domain=[0, 100])),
+                        tooltip=[
+                            alt.Tooltip("week:N", title="Uke"),
+                            alt.Tooltip("points_present:Q", title="Punkter m/data"),
+                            alt.Tooltip("points_expected:Q", title="Punkter forventet"),
+                            alt.Tooltip("mean_coverage_pct:Q", format=".1f", title="Snitt dekning (%)"),
+                            alt.Tooltip("min_coverage_pct:Q", format=".1f", title="Min dekning (%)"),
+                        ],
+                    )
+                    .properties(height=320)
+                )
+                st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            pass
+
+        st.dataframe(cov.copy(), use_container_width=True, hide_index=True)
         return
 
     years = year_list if comparison_mode == "Sammenlign år" else [year]
@@ -2082,6 +2365,22 @@ def render_data_quality_tab(
         display.columns = ["Måned", "Totalt", "Nedre", "Øvre", "Dekning (%)"]
         st.dataframe(display, use_container_width=True, hide_index=True)
 
+    if df is not None and not df.empty:
+        st.markdown("### Anomali-varsler (indikativ)")
+        st.caption(
+            f"Flagger måneder der nivået avviker mer enn ±{ANOMALY_THRESHOLD_PCT:.0f}% fra forventet basert på de andre valgte årene."
+        )
+        anomalies = detect_monthly_anomalies(df, threshold_pct=float(ANOMALY_THRESHOLD_PCT))
+        if anomalies.empty:
+            st.caption("Ingen anomalier flagget.")
+        else:
+            st.warning(f"Flagget {len(anomalies)} anomalier.")
+            st.dataframe(
+                anomalies.assign(deviation_pct=anomalies["deviation_pct"].round(1)),
+                use_container_width=True,
+                hide_index=True,
+            )
+
 
 def main():
     init_session_state()
@@ -2133,6 +2432,12 @@ def main():
             use_cache = st.checkbox("Bruk hurtigbuffer", value=True, key="use_cache")
             timeout_s = st.slider("API timeout (sekunder)", 10, 90, 60, key="timeout_s")
             coverage_threshold = st.slider("Min. dekning (%)", 50, 100, 90, key="coverage_threshold")
+            estimate_missing_points = st.checkbox(
+                "Estimer manglende målepunkter (pro-rata)",
+                value=False,
+                key="estimate_missing_points",
+                help="Når noen (men ikke alle) målepunkter mangler data i en måned, skaleres totalen opp basert på antall punkter med data. Bruk med varsomhet.",
+            )
 
         include_ramp = True
         direction = "Begge retninger"
@@ -2172,6 +2477,8 @@ def main():
             weeks = st.multiselect("Velg uker", list(range(1, 53)), default=list(range(1, 11)), key="weeks_selected")
 
         submitted = st.form_submit_button("📊 Analyser data", type="primary")
+
+    render_api_status_sidebar()
 
     if st.sidebar.button("🗑️ Tøm cache"):
         st.cache_data.clear()
@@ -2217,11 +2524,11 @@ def main():
         if (comparison_mode == "Sammenlign år" and year_list) or (comparison_mode != "Sammenlign år"):
             with st.spinner("🔄 Behandler data..."):
                 if comparison_mode == "Sammenlign år":
-                    result_tuple = process_data_for_years(point_ids, year_list, timeout_s, use_cache)
+                    result_tuple = process_data_for_years(point_ids, year_list, timeout_s, use_cache, estimate_missing_points)
                     df, coverage_summary = result_tuple
                     title = f"Årlig sammenligning for {point}"
                 elif comparison_mode == "Sammenlign måneder":
-                    result_tuple = process_data_for_months(point_ids, year, months, timeout_s, use_cache)
+                    result_tuple = process_data_for_months(point_ids, year, months, timeout_s, use_cache, estimate_missing_points)
                     if result_tuple is None:
                         df, coverage_summary = None, pd.DataFrame()
                     else:
@@ -2251,6 +2558,7 @@ def main():
                     "timeout_s": timeout_s,
                     "use_cache": use_cache,
                     "coverage_threshold": coverage_threshold,
+                    "estimate_missing_points": bool(estimate_missing_points),
                 }
 
     if not st.session_state.last_result:
@@ -2275,7 +2583,9 @@ def main():
     with tab1:
         st.subheader(title)
         render_data_coverage_banner(coverage_summary)
+        render_anomaly_banner(df)
         create_comparison_dashboard(df, point)
+        render_point_basis_note(coverage_summary)
 
     with tab2:
         st.subheader("📊 Rådata")
@@ -2305,6 +2615,8 @@ def main():
             timeout_s=timeout_s,
             use_cache=use_cache,
             coverage_threshold=float(coverage_threshold),
+            df=df,
+            coverage_summary=coverage_summary,
         )
 
     with tab5:
