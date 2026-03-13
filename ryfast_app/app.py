@@ -23,6 +23,7 @@ import logging
 import os
 import tempfile
 import time
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -57,6 +58,9 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+API_ERROR_BUFFER_LOCK = Lock()
+API_ERROR_BUFFER: List[Dict[str, Optional[str]]] = []
 
 URL = "https://trafikkdata-api.atlas.vegvesen.no"
 
@@ -213,22 +217,42 @@ def init_session_state():
         st.session_state.api_errors = []
 
 
-def record_api_error(message: str, query: Optional[str] = None) -> None:
+def _build_api_error_entry(message: str, query: Optional[str] = None) -> Dict[str, Optional[str]]:
+    return {
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "message": str(message),
+        "query": (query[:600] + "…") if query and len(query) > 600 else query,
+    }
+
+
+def _flush_api_error_buffer_to_session_state() -> None:
+    pending: List[Dict[str, Optional[str]]] = []
+    with API_ERROR_BUFFER_LOCK:
+        if not API_ERROR_BUFFER:
+            return
+        pending = API_ERROR_BUFFER.copy()
+        API_ERROR_BUFFER.clear()
+
     try:
         errors = list(st.session_state.get("api_errors", []))
-        errors.append(
-            {
-                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "message": str(message),
-                "query": (query[:600] + "…") if query and len(query) > 600 else query,
-            }
-        )
+        errors.extend(pending)
         st.session_state.api_errors = errors[-50:]
     except Exception as exc:
-        logger.debug("record_api_error: klarte ikke oppdatere session_state: %s", exc)
+        with API_ERROR_BUFFER_LOCK:
+            API_ERROR_BUFFER[:0] = pending
+            del API_ERROR_BUFFER[:-200]
+        logger.debug("flush_api_error_buffer: klarte ikke oppdatere session_state: %s", exc)
+
+
+def record_api_error(message: str, query: Optional[str] = None) -> None:
+    entry = _build_api_error_entry(message, query=query)
+    with API_ERROR_BUFFER_LOCK:
+        API_ERROR_BUFFER.append(entry)
+        del API_ERROR_BUFFER[:-200]
 
 
 def render_api_status_sidebar() -> None:
+    _flush_api_error_buffer_to_session_state()
     errors = st.session_state.get("api_errors", []) or []
     with st.sidebar.expander("🧾 API-feil / status", expanded=False):
         if not errors:
@@ -236,6 +260,8 @@ def render_api_status_sidebar() -> None:
             return
         st.warning(f"{len(errors)} API-feil registrert i denne sesjonen.")
         if st.button("Tøm API-feil", type="secondary"):
+            with API_ERROR_BUFFER_LOCK:
+                API_ERROR_BUFFER.clear()
             st.session_state.api_errors = []
             st.rerun()
         st.dataframe(pd.DataFrame(errors).iloc[::-1], use_container_width=True, hide_index=True)
@@ -1770,7 +1796,7 @@ def _pairwise_period_comparison(df: pd.DataFrame, baseline_year: str, compare_ye
     compare_df = df[[label_col, baseline_year, compare_year]].copy()
     compare_df[baseline_year] = pd.to_numeric(compare_df[baseline_year], errors="coerce")
     compare_df[compare_year] = pd.to_numeric(compare_df[compare_year], errors="coerce")
-    compare_df = compare_df.dropna(subset=[baseline_year, compare_year], how="all")
+    compare_df = compare_df.dropna(subset=[baseline_year, compare_year], how="any")
     compare_df = compare_df.rename(columns={baseline_year: "Baseline", compare_year: "Sammenligning"})
     compare_df["Endring"] = compare_df["Sammenligning"] - compare_df["Baseline"]
     compare_df["Endring (%)"] = np.where(
@@ -1778,7 +1804,7 @@ def _pairwise_period_comparison(df: pd.DataFrame, baseline_year: str, compare_ye
         compare_df["Endring"] / compare_df["Baseline"] * 100.0,
         np.nan,
     )
-    compare_df["Retning"] = np.where(compare_df["Endring"] >= 0, "Opp", "Ned")
+    compare_df["Retning"] = np.where(compare_df["Endring"].ge(0), "Opp", "Ned")
     return compare_df
 
 
