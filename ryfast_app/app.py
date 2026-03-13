@@ -279,6 +279,7 @@ def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, us
                         result[point_id] = monthly
             except Exception as e:
                 logger.error("Feil ved henting av data for punkt %s, år %s: %s", point_id, year, str(e))
+                record_api_error(f"Punkt {point_id} feil (år {year}): {e}")
 
     return result
 
@@ -1442,10 +1443,11 @@ def build_pdf_report(
                             if pd.isna(ryf) and pd.isna(hund):
                                 continue
                             pdf.cell(0, 6, pdf_safe_text(f"{month_name}: Ryfylke {float(ryf):.1f}%  Hundvåg {float(hund):.1f}%"), ln=True)
-                        except Exception:
+                        except Exception as exc:
+                            logger.warning("PDF: tunnel-dekning per måned feilet: %s", exc)
                             continue
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("PDF: Ryfast tunnel-fordeling feilet: %s", exc)
 
         # Data quality warnings
         try:

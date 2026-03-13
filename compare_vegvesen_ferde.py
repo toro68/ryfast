@@ -253,9 +253,10 @@ def parse_ferde_ryfast_sheet(rows: List[List[str]]) -> List[FerdeMonthRow]:
             x = x.strip()
             if not x:
                 return 0
-            if "E" in x or "e" in x:
+            try:
                 return int(float(x))
-            return int(float(x))
+            except (ValueError, TypeError):
+                return 0
 
         income = as_int(c)
         passages = as_int(d)
@@ -318,7 +319,7 @@ def main() -> int:
 
     out_rows: List[Dict[str, object]] = []
     for year in years:
-        veg_monthly, veg_cov, veg_points_count, per_point = fetch_vegvesen_monthly_totals(point_ids, year)
+        veg_monthly, veg_cov, veg_points_count, _ = fetch_vegvesen_monthly_totals(point_ids, year)
         for month in range(1, 13):
             ferde = ferde_by_ym.get((year, month))
             veg_total = veg_monthly.get(month)
