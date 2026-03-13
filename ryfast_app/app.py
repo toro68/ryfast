@@ -203,8 +203,8 @@ def record_api_error(message: str, query: Optional[str] = None) -> None:
             }
         )
         st.session_state.api_errors = errors[-50:]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("record_api_error: klarte ikke oppdatere session_state: %s", exc)
 
 
 def render_api_status_sidebar() -> None:
@@ -258,23 +258,13 @@ def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, us
     if year < 2019:
         return {}
 
+    fetch_fn = _fetch_data_cached if use_cache else _fetch_data_uncached
     result: Dict[str, List[Dict]] = {}
-    if use_cache:
-        for point_id in point_ids:
-            query = QUERY_TEMPLATE.format(point_id=point_id, year=year)
-            data = fetch_data(query, timeout_s, use_cache=True)
-            if data and data.get("data", {}).get("trafficData"):
-                monthly = data["data"]["trafficData"]["volume"]["average"]["daily"]["byMonth"]
-                if monthly:
-                    result[point_id] = monthly
-        return result
-
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(point_ids), 6)) as executor:
         future_to_point = {
-            executor.submit(_fetch_data_uncached, QUERY_TEMPLATE.format(point_id=pid, year=year), timeout_s): pid
+            executor.submit(fetch_fn, QUERY_TEMPLATE.format(point_id=pid, year=year), timeout_s): pid
             for pid in point_ids
         }
-
         for future, point_id in future_to_point.items():
             try:
                 data = future.result()
@@ -298,13 +288,12 @@ def fetch_weekly_traffic_data(
     cov_result: Dict[str, Dict[str, float]] = {}
     for week_num in week_numbers:
         try:
-            jan_1 = datetime(year, 1, 1)
-            week_1_start = jan_1 - timedelta(days=jan_1.weekday())
-            if week_1_start.year < year:
-                week_1_start += timedelta(weeks=1)
-            week_start = week_1_start + timedelta(weeks=week_num - 1)
+            # ISO 8601: Jan 4 is always in week 1, so Monday of week 1 is reliable
+            jan_4 = datetime(year, 1, 4)
+            week_1_monday = jan_4 - timedelta(days=jan_4.isocalendar()[2] - 1)
+            week_start = week_1_monday + timedelta(weeks=week_num - 1)
             week_end = week_start + timedelta(days=6)
-            if week_start.year != year or week_end.year != year:
+            if week_start.isocalendar()[0] != year or week_end.isocalendar()[0] != year:
                 continue
 
             from_date = week_start.strftime("%Y-%m-%dT00:00:00+01:00")
@@ -437,23 +426,16 @@ def calculate_yearly_total_from_monthly_averages(df: pd.DataFrame, year: int) ->
     if df is None or df.empty or "Month" not in df.columns or year_col not in df.columns:
         return 0.0, 0, 0
 
-    total = 0.0
-    months_present = 0
-    days_covered = 0
-    for _, row in df.iterrows():
-        try:
-            month = int(row["Month"])
-        except Exception:
-            continue
-        avg_daily = row.get(year_col, None)
-        if pd.isna(avg_daily) or avg_daily is None or not (1 <= month <= 12):
-            continue
-        dim = calendar.monthrange(year, month)[1]
-        total += float(avg_daily) * dim
-        months_present += 1
-        days_covered += dim
+    months = pd.to_numeric(df["Month"], errors="coerce")
+    avg_vals = pd.to_numeric(df[year_col], errors="coerce")
+    valid = avg_vals.notna() & months.between(1, 12)
+    if not valid.any():
+        return 0.0, 0, 0
 
-    return total, months_present, days_covered
+    valid_months = months[valid].astype(int)
+    dims = valid_months.apply(lambda m: calendar.monthrange(year, m)[1])
+    total = float((avg_vals[valid] * dims).sum())
+    return total, int(valid.sum()), int(dims.sum())
 
 
 def extract_point_monthly_metrics(traffic_by_point: Dict[str, List[Dict]], year: int) -> pd.DataFrame:
@@ -606,7 +588,9 @@ def totals_with_uncertainty_from_metrics(metrics_df: pd.DataFrame) -> pd.DataFra
     if metrics_df is None or metrics_df.empty:
         return pd.DataFrame()
     tmp = metrics_df.copy()
-    tmp["days_in_month"] = tmp["month"].apply(lambda m: calendar.monthrange(int(tmp["year"].iloc[0]), int(m))[1])
+    tmp["days_in_month"] = tmp.apply(
+        lambda row: calendar.monthrange(int(row["year"]), int(row["month"]))[1], axis=1
+    )
     tmp["total"] = tmp["avg_daily"] * tmp["days_in_month"]
     tmp["total_lower"] = tmp["ci_lower"] * tmp["days_in_month"]
     tmp["total_upper"] = tmp["ci_upper"] * tmp["days_in_month"]
@@ -626,22 +610,15 @@ def totals_with_uncertainty_from_metrics(metrics_df: pd.DataFrame) -> pd.DataFra
 def monthly_totals_from_monthly_averages(df: pd.DataFrame, year: int) -> pd.Series:
     year_col = str(year)
     if df is None or df.empty or "Month" not in df.columns or year_col not in df.columns:
-        return pd.Series([pd.NA] * (len(df) if df is not None else 0))
+        return pd.Series([np.nan] * (len(df) if df is not None else 0))
 
-    totals: List[object] = []
-    for _, row in df.iterrows():
-        try:
-            month = int(row["Month"])
-        except Exception:
-            totals.append(pd.NA)
-            continue
-        avg_daily = row.get(year_col, None)
-        if pd.isna(avg_daily) or avg_daily is None or not (1 <= month <= 12):
-            totals.append(pd.NA)
-            continue
-        dim = calendar.monthrange(year, month)[1]
-        totals.append(float(avg_daily) * dim)
-    return pd.Series(totals)
+    months = pd.to_numeric(df["Month"], errors="coerce")
+    avg_vals = pd.to_numeric(df[year_col], errors="coerce")
+    valid = avg_vals.notna() & months.between(1, 12)
+    dims = months.where(valid).apply(
+        lambda m: calendar.monthrange(year, int(m))[1] if pd.notna(m) else np.nan
+    )
+    return (avg_vals * dims).where(valid)
 
 
 def compute_monthly_totals_table(df: pd.DataFrame, years: List[int]) -> pd.DataFrame:
@@ -704,7 +681,9 @@ def calculate_growth_rates(df: pd.DataFrame) -> pd.DataFrame:
             prev_year = year_columns[i - 1]
             curr_year = year_columns[i]
             growth_col = f"Vekst {prev_year}-{curr_year} (%)"
-            growth_df[growth_col] = ((pd.to_numeric(df[curr_year], errors="coerce") - pd.to_numeric(df[prev_year], errors="coerce")) / pd.to_numeric(df[prev_year], errors="coerce") * 100).round(1)
+            curr = pd.to_numeric(df[curr_year], errors="coerce")
+            prev_vals = pd.to_numeric(df[prev_year], errors="coerce")
+            growth_df[growth_col] = ((curr - prev_vals) / prev_vals * 100).round(1)
     return growth_df
 
 
@@ -863,8 +842,8 @@ def build_excel_report(
             chart.height = 9
             chart.width = 20
             ws_summary.add_chart(chart, "I8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Excel: klarte ikke legge til årsestimatgraf: %s", exc)
 
     # Data sheet
     ws_data = wb.create_sheet("Data")
@@ -1040,8 +1019,8 @@ def build_excel_report(
                     ws_low.column_dimensions["D"].width = 12
                     for rr in range(2, 2 + len(below)):
                         ws_low.cell(row=rr, column=4).number_format = num_format_pct_1
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Excel: lav-dekning-ark feilet: %s", exc)
 
             if point == "Ryfast (sum tunneler)":
                 point_ids_by_group = {
@@ -1108,8 +1087,8 @@ def build_excel_report(
                             if col_name in list(point_ids_by_group.keys()):
                                 for rr in range(2, 2 + len(coverage_by_group_df)):
                                     ws_tcov.cell(row=rr, column=col_idx).number_format = num_format_pct_1
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Excel: tunnel-ark feilet: %s", exc)
 
             # Data quality warnings
             try:
@@ -1155,12 +1134,32 @@ def build_excel_report(
 
                     ws_summary["A7"] = f"Varsler: {len(warnings)} (se fanen 'Warnings')"
                     ws_summary["A7"].alignment = wrap_top
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Excel: varsels-ark feilet: %s", exc)
 
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
+
+
+def _pdf_embed_figure(pdf: "FPDF", fig: "go.Figure") -> None:
+    """Render a Plotly figure as PNG and embed it in the PDF, cleaning up the temp file."""
+    img_path: Optional[str] = None
+    try:
+        img_bytes = fig.to_image(format="png", scale=2)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(img_bytes)
+            img_path = tmp.name
+        pdf.ln(2)
+        pdf.image(img_path, w=190)
+    except Exception as exc:
+        logger.warning("PDF: klarte ikke legge til figur: %s", exc)
+    finally:
+        if img_path:
+            try:
+                os.remove(img_path)
+            except OSError:
+                pass
 
 
 def build_pdf_report(
@@ -1260,22 +1259,9 @@ def build_pdf_report(
                     height=320,
                     margin=dict(l=10, r=10, t=40, b=10),
                 )
-                img_bytes = fig.to_image(format="png", scale=2)
-                img_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                        tmp.write(img_bytes)
-                        img_path = tmp.name
-                    pdf.ln(2)
-                    pdf.image(img_path, w=190)
-                finally:
-                    if img_path:
-                        try:
-                            os.remove(img_path)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                _pdf_embed_figure(pdf, fig)
+            except Exception as exc:
+                logger.warning("PDF: helårsestimat-graf feilet: %s", exc)
 
     if comparison_mode != "Sammenlign uker":
         selected_year = max(year_list) if comparison_mode == "Sammenlign år" else year
@@ -1316,22 +1302,9 @@ def build_pdf_report(
                     height=360,
                     margin=dict(l=10, r=10, t=40, b=10),
                 )
-                img_bytes = fig.to_image(format="png", scale=2)
-                img_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                        tmp.write(img_bytes)
-                        img_path = tmp.name
-                    pdf.ln(2)
-                    pdf.image(img_path, w=190)
-                finally:
-                    if img_path:
-                        try:
-                            os.remove(img_path)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                _pdf_embed_figure(pdf, fig)
+            except Exception as exc:
+                logger.warning("PDF: totale passeringer-graf feilet: %s", exc)
         if not totals_ci.empty:
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 12)
@@ -1401,22 +1374,9 @@ def build_pdf_report(
                         height=320,
                         margin=dict(l=10, r=10, t=40, b=10),
                     )
-                    img_bytes = fig.to_image(format="png", scale=2)
-                    img_path = None
-                    try:
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                            tmp.write(img_bytes)
-                            img_path = tmp.name
-                        pdf.ln(2)
-                        pdf.image(img_path, w=190)
-                    finally:
-                        if img_path:
-                            try:
-                                os.remove(img_path)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                    _pdf_embed_figure(pdf, fig)
+                except Exception as exc:
+                    logger.warning("PDF: dekning-graf feilet: %s", exc)
 
         # Ryfast tunnel breakdown (optional)
         if point == "Ryfast (sum tunneler)":
@@ -1447,22 +1407,9 @@ def build_pdf_report(
                         )
                         fig.update_yaxes(tickformat=",")
                         fig.update_layout(template="plotly_white", height=340, margin=dict(l=10, r=10, t=40, b=10))
-                        img_bytes = fig.to_image(format="png", scale=2)
-                        img_path = None
-                        try:
-                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                                tmp.write(img_bytes)
-                                img_path = tmp.name
-                            pdf.ln(2)
-                            pdf.image(img_path, w=190)
-                        finally:
-                            if img_path:
-                                try:
-                                    os.remove(img_path)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                        _pdf_embed_figure(pdf, fig)
+                    except Exception as exc:
+                        logger.warning("PDF: tunnelfordeling-graf feilet: %s", exc)
                 if cov_by_group_df is not None and not cov_by_group_df.empty:
                     pdf.ln(2)
                     pdf.set_font("Helvetica", "B", 12)
@@ -1507,8 +1454,8 @@ def build_pdf_report(
                 pdf.set_font("Helvetica", "", 10)
                 for w in warnings[:15]:
                     pdf.multi_cell(0, 5, pdf_safe_text(f"- {w}"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("PDF: feil ved generering av varselseksjon: %s", exc)
 
     output = pdf.output(dest="S")
     return bytes(output) if isinstance(output, (bytes, bytearray)) else output.encode("latin-1")
@@ -1750,19 +1697,19 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
     years = _year_columns(df)
     if not years:
         st.warning("Fant ingen årskolonner i datasettet. Viser linjediagram.")
-        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_no_years")
         return
 
     long_df = _long_year_df(df)
     if long_df.empty:
         st.warning("Fant ingen plottbare data. Viser linjediagram.")
-        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_empty")
         return
 
     if chart_type == "heatmap":
         if "Month Name" not in long_df.columns or len(years) < 2:
             st.info("Varmekart krever minst 2 år og månedsdata.")
-            st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+            st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_no_heatmap")
             return
 
         month_sort = MONTH_NAMES
@@ -1821,7 +1768,7 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
         st.altair_chart(chart, use_container_width=True)
         return
 
-    st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line")
+    st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_default")
 
 
 def create_comparison_dashboard(df: pd.DataFrame, point: str):
@@ -2009,13 +1956,13 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
 
     point_cov_text = (
         f"**Punktdekning:** min {present_min}/{expected} punkter rapporterer"
-        + (f" (snitt {present_avg:.1f}/{expected})" if expected and present_avg == present_avg else "")
+        + (f" (snitt {present_avg:.1f}/{expected})" if expected and not pd.isna(present_avg) else "")
         + (f" — mangler i {missing_periods}/{periods_total} perioder" if periods_total else "")
     )
     data_cov_text = "**Datadekning:** "
-    if mean_cov == mean_cov:
+    if not pd.isna(mean_cov):
         data_cov_text += f"snitt {mean_cov:.1f}%"
-        if min_cov == min_cov:
+        if not pd.isna(min_cov):
             data_cov_text += f", min {min_cov:.1f}%"
         data_cov_text += " (på rapporterende punkter)"
     else:
@@ -2084,8 +2031,8 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
                         .properties(height=220)
                     )
                     st.altair_chart(chart, use_container_width=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Dekning: klarte ikke vise detalj-graf: %s", exc)
 
         cols: List[str] = []
         if "year" in coverage_df.columns:
@@ -2261,8 +2208,8 @@ def render_data_quality_tab(
                     .properties(height=320)
                 )
                 st.altair_chart(chart, use_container_width=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Datakvalitet (uker): klarte ikke vise dekningsgraf: %s", exc)
 
         st.dataframe(cov.copy(), use_container_width=True, hide_index=True)
         return
