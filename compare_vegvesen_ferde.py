@@ -1,3 +1,5 @@
+"""Compare monthly Vegvesen counts with Ferde figures and export a CSV summary."""
+
 import argparse
 import calendar
 import csv
@@ -7,8 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import requests
 import xml.etree.ElementTree as ET
+
+import requests
 
 
 URL = "https://trafikkdata-api.atlas.vegvesen.no"
@@ -25,7 +28,12 @@ TRAFFIC_POINT_GROUPS: Dict[str, List[str]] = {
         "92743V2726085",
         "25926V2725990",
     ],
-    "Hundvågtunnelen (inkl pårampe)": ["10239V2725979", "62464V2725991", "92743V2726085", "25926V2725990"],
+    "Hundvågtunnelen (inkl pårampe)": [
+        "10239V2725979",
+        "62464V2725991",
+        "92743V2726085",
+        "25926V2725990",
+    ],
     "Hundvågtunnelen (uten pårampe)": ["10239V2725979", "92743V2726085"],
     "Ryfylketunnelen": ["99040V2725982", "00911V2725983"],
 }
@@ -70,6 +78,8 @@ query {{
 
 @dataclass(frozen=True)
 class FerdeMonthRow:
+    """One monthly row parsed from the Ferde spreadsheet."""
+
     year: int
     month: int
     income_nok: int
@@ -89,11 +99,17 @@ def _gql(query: str, timeout_s: int = 30) -> Dict:
 def fetch_vegvesen_monthly_totals(
     point_ids: List[str],
     year: int,
-) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, int], Dict[str, Dict[int, float]]]:
+) -> Tuple[
+    Dict[int, float],
+    Dict[int, float],
+    Dict[int, int],
+    Dict[str, Dict[int, float]],
+]:
     """
     Returnerer:
     - monthly_totals[month] = sum(ÅDT_måned * dager_i_måned) på tvers av punkter
-    - monthly_coverage_avg[month] = snitt dekning (%) for måneden på tvers av punkter (der coverage finnes)
+        - monthly_coverage_avg[month] = snitt dekning (%) for måneden
+            på tvers av punkter (der coverage finnes)
     - per_point_monthly[point_id][month] = (ÅDT_måned * dager_i_måned) for punktet
     """
     monthly_avg_sum: Dict[int, float] = {}
@@ -142,7 +158,9 @@ def _cell_to_rc(ref: str) -> Optional[Tuple[int, int]]:
     return row - 1, _col_to_idx(col)
 
 
-def read_xlsx_sheet_rows(xlsx_path: Path, sheet_index: int = 0) -> List[List[str]]:
+def read_xlsx_sheet_rows(  # pylint: disable=too-many-locals,too-many-branches
+    xlsx_path: Path, sheet_index: int = 0
+) -> List[List[str]]:
     """
     Minimal XLSX-leser (uten openpyxl): returnerer en liste av rader (liste av celler som str).
     Støtter sharedStrings og numeriske verdier for enkle ark.
@@ -278,6 +296,8 @@ def parse_ferde_ryfast_sheet(rows: List[List[str]]) -> List[FerdeMonthRow]:
 
 
 def write_csv(path: Path, header: List[str], rows: Iterable[Dict[str, object]]) -> None:
+    """Write semicolon-separated output rows to disk."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=header, delimiter=";")
@@ -287,6 +307,8 @@ def write_csv(path: Path, header: List[str], rows: Iterable[Dict[str, object]]) 
 
 
 def main() -> int:
+    """Run the comparison CLI and export monthly comparison rows."""
+
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--ferde-xlsx",
@@ -313,12 +335,14 @@ def main() -> int:
     years = [int(y.strip()) for y in args.years.split(",") if y.strip()]
 
     ferde_rows = parse_ferde_ryfast_sheet(read_xlsx_sheet_rows(ferde_path))
-    ferde_by_ym: Dict[Tuple[int, int], FerdeMonthRow] = {(r.year, r.month): r for r in ferde_rows}
+    ferde_by_ym: Dict[Tuple[int, int], FerdeMonthRow] = {
+        (r.year, r.month): r for r in ferde_rows
+    }
 
     point_ids = TRAFFIC_POINT_GROUPS[args.group]
 
     out_rows: List[Dict[str, object]] = []
-    for year in years:
+    for year in years:  # pylint: disable=too-many-locals
         veg_monthly, veg_cov, veg_points_count, _ = fetch_vegvesen_monthly_totals(point_ids, year)
         for month in range(1, 13):
             ferde = ferde_by_ym.get((year, month))
@@ -326,10 +350,18 @@ def main() -> int:
 
             ferde_total = ferde.passages_total if ferde else None
             ferde_ex = ferde.passages_exemptions if ferde else None
-            ferde_pay = (ferde_total - ferde_ex) if (ferde_total is not None and ferde_ex is not None) else None
+            ferde_pay = (
+                (ferde_total - ferde_ex)
+                if (ferde_total is not None and ferde_ex is not None)
+                else None
+            )
             ferde_income = ferde.income_nok if ferde else None
 
-            diff = (veg_total - ferde_total) if (veg_total is not None and ferde_total is not None) else None
+            diff = (
+                (veg_total - ferde_total)
+                if (veg_total is not None and ferde_total is not None)
+                else None
+            )
             ratio = (veg_total / ferde_total) if (veg_total is not None and ferde_total) else None
 
             out_rows.append(
@@ -338,7 +370,9 @@ def main() -> int:
                     "år": year,
                     "måned": month,
                     "vegvesen_tellinger": int(round(veg_total)) if veg_total is not None else "",
-                    "vegvesen_dekning_snitt_prosent": round(veg_cov.get(month), 1) if month in veg_cov else "",
+                    "vegvesen_dekning_snitt_prosent": (
+                        round(veg_cov.get(month), 1) if month in veg_cov else ""
+                    ),
                     "vegvesen_antall_punkt_med_data": veg_points_count.get(month, 0),
                     "vegvesen_antall_punkt_total": len(point_ids),
                     "ferde_passeringer": ferde_total if ferde_total is not None else "",

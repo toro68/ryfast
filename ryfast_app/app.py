@@ -1,3 +1,22 @@
+"""Streamlit app for fetching, comparing, and exporting Ryfast traffic data."""
+
+# pylint: disable=
+#   line-too-long,
+#   too-many-lines,
+#   missing-function-docstring,
+#   too-many-locals,
+#   too-many-branches,
+#   too-many-statements,
+#   too-many-arguments,
+#   too-many-positional-arguments,
+#   too-many-nested-blocks,
+#   import-error,
+#   invalid-name,
+#   non-ascii-name,
+#   use-dict-literal,
+#   consider-iterating-dictionary,
+#   superfluous-parens
+
 import calendar
 import io
 import logging
