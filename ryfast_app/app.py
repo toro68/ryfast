@@ -1570,25 +1570,29 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
         fig = go.Figure()
         year_columns = [col for col in df.columns if col not in ["Month", "Month Name", "Week", "Volume"]]
         colors = px.colors.qualitative.Set1
+        x_vals = df["Month Name"].tolist() if "Month Name" in df.columns else list(df.index)
         for i, year in enumerate(year_columns):
             y = pd.to_numeric(df[year], errors="coerce")
             fig.add_trace(
                 go.Scatter(
-                    x=df["Month Name"] if "Month Name" in df.columns else df.index,
+                    x=x_vals,
                     y=y,
                     mode="lines+markers",
                     name=str(year),
-                    line=dict(color=colors[i % len(colors)], width=3),
-                    marker=dict(size=8),
+                    line=dict(color=colors[i % len(colors)], width=2.5),
+                    marker=dict(size=7, symbol="circle"),
+                    hovertemplate="%{x}: <b>%{y:,.0f}</b> ÅDT<extra>%{fullData.name}</extra>",
                 )
             )
         fig.update_layout(
-            title=f"Trafikkutvikling for {point}",
+            title=dict(text=f"Trafikkutvikling for {point}", font=dict(size=15)),
             xaxis_title="Måned",
-            yaxis_title="Gjennomsnittlig døgntrafikk",
+            yaxis=dict(title="Gjennomsnittlig døgntrafikk (ÅDT)", tickformat=","),
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             template=template,
+            height=520,
+            margin=dict(t=60, b=40),
         )
         return fig
 
@@ -1606,16 +1610,20 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
                     x=x,
                     y=y,
                     colorscale="RdYlBu_r",
-                    colorbar=dict(title="Trafikk"),
+                    colorbar=dict(title="ÅDT"),
                     hoverongaps=False,
+                    text=[[f"{v:,.0f}" if not np.isnan(v) else "" for v in row] for row in z],
+                    texttemplate="%{text}",
+                    textfont=dict(size=10),
+                    hovertemplate="%{y} – %{x}: <b>%{z:,.0f}</b> ÅDT<extra></extra>",
                 )
             )
             fig.update_layout(
-                title=f"Sesongmønster for {point}",
+                title=dict(text=f"Sesongmønster for {point}", font=dict(size=15)),
                 xaxis_title="Måned",
                 yaxis_title="År",
                 template=template,
-                height=520,
+                height=max(320, 120 * len(y) + 80),
             )
             return fig
         return create_advanced_visualization(df, point, "line")
@@ -1629,7 +1637,7 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
         colors = px.colors.qualitative.Set1
         for i, year in enumerate(year_columns):
             yvals = pd.to_numeric(df[year], errors="coerce").to_numpy(dtype=float)
-            yvals = [v for v in yvals.tolist() if v == v]  # filter NaN
+            yvals = [v for v in yvals.tolist() if not np.isnan(v)]
             if not yvals:
                 continue
             fig.add_trace(
@@ -1637,19 +1645,21 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
                     y=yvals,
                     name=str(year),
                     boxpoints="all",
-                    jitter=0.25,
-                    marker=dict(color=colors[i % len(colors)], size=4, opacity=0.6),
+                    jitter=0.3,
+                    marker=dict(color=colors[i % len(colors)], size=5, opacity=0.55),
                     line=dict(color=colors[i % len(colors)], width=2),
+                    hovertemplate="%{y:,.0f} ÅDT<extra>%{fullData.name}</extra>",
                 )
             )
         if not fig.data:
             return create_advanced_visualization(df, point, "line")
         fig.update_layout(
-            title=f"Trafikkfordeling for {point}",
-            yaxis_title="Gjennomsnittlig døgntrafikk",
+            title=dict(text=f"Trafikkfordeling for {point}", font=dict(size=15)),
+            yaxis=dict(title="Gjennomsnittlig døgntrafikk (ÅDT)", tickformat=","),
             xaxis_title="År",
             template=template,
             height=520,
+            margin=dict(t=60, b=40),
         )
         return fig
 
@@ -1669,10 +1679,19 @@ def create_advanced_visualization(df: pd.DataFrame, point: str, chart_type: str)
         x=x_col,
         y="Trafikk",
         color="År",
+        markers=True,
         title=f"Trafikkutvikling for {point}",
-        labels={"Trafikk": "Gjennomsnittlig døgntrafikk", x_col: "Periode"},
+        labels={"Trafikk": "Gjennomsnittlig døgntrafikk (ÅDT)", x_col: "Periode"},
     )
-    fig.update_layout(template=template, height=520)
+    fig.update_traces(hovertemplate="%{x}: <b>%{y:,.0f}</b> ÅDT<extra>%{fullData.name}</extra>")
+    fig.update_layout(
+        template=template,
+        height=520,
+        hovermode="x unified",
+        yaxis=dict(tickformat=","),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(t=60, b=40),
+    )
     return fig
 
 
@@ -1713,21 +1732,35 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
             return
 
         month_sort = MONTH_NAMES
-        chart = (
+        rect = (
             alt.Chart(long_df)
             .mark_rect()
             .encode(
                 x=alt.X("Month Name:N", sort=month_sort, title="Måned"),
                 y=alt.Y("År:N", sort=sorted([str(y) for y in years]), title="År"),
-                color=alt.Color("Trafikk:Q", scale=alt.Scale(scheme="redyellowblue", reverse=True), title="Trafikk"),
+                color=alt.Color("Trafikk:Q", scale=alt.Scale(scheme="redyellowblue", reverse=True), title="ÅDT"),
                 tooltip=[
                     alt.Tooltip("År:N"),
                     alt.Tooltip("Month Name:N", title="Måned"),
-                    alt.Tooltip("Trafikk:Q", format=",.0f"),
+                    alt.Tooltip("Trafikk:Q", format=",.0f", title="ÅDT"),
                 ],
             )
-            .properties(title=f"Sesongmønster for {point}", height=420)
         )
+        text = (
+            alt.Chart(long_df)
+            .mark_text(fontSize=9)
+            .encode(
+                x=alt.X("Month Name:N", sort=month_sort),
+                y=alt.Y("År:N", sort=sorted([str(y) for y in years])),
+                text=alt.Text("Trafikk:Q", format=",.0f"),
+                color=alt.condition(
+                    alt.datum.Trafikk > long_df["Trafikk"].median(),
+                    alt.value("white"),
+                    alt.value("#333"),
+                ),
+            )
+        )
+        chart = (rect + text).properties(title=f"Sesongmønster for {point}", height=420)
         st.altair_chart(chart, use_container_width=True)
         return
 
@@ -1756,14 +1789,18 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
 
         chart = (
             alt.Chart(long_df)
-            .mark_line(point=True)
+            .mark_line(point=alt.OverlayMarkDef(size=60))
             .encode(
                 x=x,
-                y=alt.Y("Trafikk:Q", title="Gjennomsnittlig døgntrafikk"),
-                color=alt.Color("År:N", sort=sorted([str(y) for y in years])),
-                tooltip=[alt.Tooltip("År:N"), alt.Tooltip("Trafikk:Q", format=",.0f")],
+                y=alt.Y("Trafikk:Q", title="Gjennomsnittlig døgntrafikk (ÅDT)", axis=alt.Axis(format=",d")),
+                color=alt.Color("År:N", sort=sorted([str(y) for y in years]), title="År"),
+                tooltip=[
+                    alt.Tooltip("År:N", title="År"),
+                    alt.Tooltip("Month Name:N", title="Måned") if "Month Name" in long_df.columns else alt.Tooltip("Week:N", title="Uke"),
+                    alt.Tooltip("Trafikk:Q", format=",.0f", title="ÅDT"),
+                ],
             )
-            .properties(title=f"Trafikkutvikling for {point}", height=420)
+            .properties(title=f"Trafikkutvikling for {point}", height=460)
         )
         st.altair_chart(chart, use_container_width=True)
         return
@@ -1804,6 +1841,29 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
 
     if chart_type in {"heatmap", "box", "line_with_confidence"}:
         _render_altair_chart(df, point, chart_type)
+    elif is_weekly:
+        # Dedicated bar chart for weekly volume
+        week_order = sorted(
+            df["Week"].astype(str).tolist(),
+            key=lambda s: int("".join([c for c in s if c.isdigit()]) or "0"),
+        )
+        fig = px.bar(
+            df, x="Week", y="Volume",
+            title=f"Ukentlig trafikkvolum for {point}",
+            labels={"Volume": "Gjennomsnittlig døgntrafikk (ÅDT)", "Week": "Uke"},
+            category_orders={"Week": week_order},
+        )
+        fig.update_traces(
+            marker_color="#1f77b4",
+            hovertemplate="%{x}: <b>%{y:,.0f}</b> ÅDT<extra></extra>",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            height=480,
+            yaxis=dict(tickformat=","),
+            margin=dict(t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True, key="weekly_bar", config={"displayModeBar": True})
     else:
         fig = create_advanced_visualization(df, point, chart_type)
         st.plotly_chart(
@@ -1848,12 +1908,30 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
                     .encode(
                         x=alt.X(f"{x_col}:N", title="Periode"),
                         y=alt.Y("Vekst (%):Q", title="Vekst (%)"),
-                        color=alt.Color("Periode:N"),
-                        tooltip=[alt.Tooltip("Periode:N"), alt.Tooltip("Vekst (%):Q", format=".1f")],
+                        color=alt.condition(
+                            alt.datum["Vekst (%)"] >= 0,
+                            alt.value("#2ca02c"),
+                            alt.value("#d62728"),
+                        ),
+                        tooltip=[alt.Tooltip("Periode:N"), alt.Tooltip("Vekst (%):Q", format="+.1f")],
                     )
                     .properties(height=320)
                 )
-                st.altair_chart((bars + zero).properties(title="År-til-år vekstrater"), use_container_width=True)
+                text = (
+                    alt.Chart(growth_melted)
+                    .mark_text(dy=alt.ExprRef("datum['Vekst (%)'] >= 0 ? -8 : 8"), fontSize=10)
+                    .encode(
+                        x=alt.X(f"{x_col}:N"),
+                        y=alt.Y("Vekst (%):Q"),
+                        text=alt.Text("Vekst (%):Q", format="+.1f"),
+                        color=alt.condition(
+                            alt.datum["Vekst (%)"] >= 0,
+                            alt.value("#1a7a1a"),
+                            alt.value("#a01a1a"),
+                        ),
+                    )
+                )
+                st.altair_chart((bars + zero + text).properties(title="År-til-år vekstrater"), use_container_width=True)
 
 
 def process_data_for_years(
@@ -2003,7 +2081,7 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
                         tooltips.insert(0, alt.Tooltip("year:N", title="År"))
                     chart = (
                         alt.Chart(plot_df)
-                        .mark_line(point=True)
+                        .mark_line(point=alt.OverlayMarkDef(size=50))
                         .encode(
                             x=alt.X("month_name:N", sort=MONTH_NAMES, title="Måned"),
                             y=alt.Y("mean_coverage_pct:Q", title="Snitt dekning (%)", scale=alt.Scale(domain=[0, 100])),
@@ -2019,7 +2097,7 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
                     week_order = sorted(plot_df["week"].astype(str).unique(), key=lambda s: int("".join([c for c in s if c.isdigit()]) or "0"))
                     chart = (
                         alt.Chart(plot_df)
-                        .mark_line(point=True, color="#1f77b4")
+                        .mark_line(point=alt.OverlayMarkDef(size=50), color="#1f77b4")
                         .encode(
                             x=alt.X("week:N", sort=week_order, title="Uke"),
                             y=alt.Y("mean_coverage_pct:Q", title="Snitt dekning (%)", scale=alt.Scale(domain=[0, 100])),
@@ -2115,8 +2193,17 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
     melt_cols = [str(y) for y in years_for_totals if str(y) in totals_df.columns]
     if melt_cols:
         melted = totals_df.melt(id_vars=["Month", "Month Name"], value_vars=melt_cols, var_name="År", value_name="Passeringer")
-        fig_totals = px.bar(melted, x="Month Name", y="Passeringer", color="År", barmode="group", title="Totale passeringer per måned")
-        fig_totals.update_yaxes(tickformat=",")
+        fig_totals = px.bar(
+            melted, x="Month Name", y="Passeringer", color="År", barmode="group",
+            title="Totale passeringer per måned",
+            labels={"Passeringer": "Passeringer", "Month Name": "Måned"},
+        )
+        fig_totals.update_traces(hovertemplate="%{x}: <b>%{y:,.0f}</b><extra>%{fullData.name}</extra>")
+        fig_totals.update_layout(
+            yaxis=dict(tickformat=","),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(t=60, b=40),
+        )
         st.plotly_chart(fig_totals, use_container_width=True)
 
     if point == "Ryfast (sum tunneler)":
