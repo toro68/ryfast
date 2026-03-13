@@ -4,7 +4,7 @@ import logging
 import os
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -98,6 +98,10 @@ API_RETRY_DELAY = 1
 API_CACHE_TTL = 24 * 3600
 FULL_COVERAGE_TOL_PCT = 0.05  # tolerance to avoid float noise around 100%
 ANOMALY_THRESHOLD_PCT = 20.0
+
+COMPARE_YEARS = "Sammenlign år"
+COMPARE_MONTHS = "Sammenlign måneder"
+COMPARE_WEEKS = "Sammenlign uker"
 
 QUERY_TEMPLATE = """
 query {{
@@ -236,6 +240,7 @@ def _fetch_data_uncached(query: str, timeout_s: int) -> Optional[Dict]:
             record_api_error(f"Timeout (forsøk {attempt + 1}/{API_MAX_RETRIES})", query=query)
             if attempt == API_MAX_RETRIES - 1:
                 return None
+            time.sleep(API_RETRY_DELAY * (attempt + 1))
         except requests.RequestException as e:
             logger.warning("Request failed on attempt %s/%s: %s", attempt + 1, API_MAX_RETRIES, str(e))
             record_api_error(f"RequestException (forsøk {attempt + 1}/{API_MAX_RETRIES}): {e}", query=query)
@@ -284,26 +289,42 @@ def fetch_weekly_traffic_data(
     if year < 2019:
         return {}, {}
 
+    # Pre-compute valid week date ranges (ISO 8601: Jan 4 is always in week 1)
+    jan_4 = datetime(year, 1, 4)
+    week_1_monday = jan_4 - timedelta(days=jan_4.isocalendar()[2] - 1)
+    valid_weeks: List[Tuple[int, str, str]] = []
+    for week_num in week_numbers:
+        week_start = week_1_monday + timedelta(weeks=week_num - 1)
+        week_end = week_start + timedelta(days=6)
+        if week_start.isocalendar()[0] != year or week_end.isocalendar()[0] != year:
+            continue
+        valid_weeks.append((
+            week_num,
+            week_start.strftime("%Y-%m-%dT00:00:00+01:00"),
+            week_end.strftime("%Y-%m-%dT23:59:59+01:00"),
+        ))
+
+    if not valid_weeks or not point_ids:
+        return {}, {}
+
     result: Dict[str, Dict[str, float]] = {}
     cov_result: Dict[str, Dict[str, float]] = {}
-    for week_num in week_numbers:
-        try:
-            # ISO 8601: Jan 4 is always in week 1, so Monday of week 1 is reliable
-            jan_4 = datetime(year, 1, 4)
-            week_1_monday = jan_4 - timedelta(days=jan_4.isocalendar()[2] - 1)
-            week_start = week_1_monday + timedelta(weeks=week_num - 1)
-            week_end = week_start + timedelta(days=6)
-            if week_start.isocalendar()[0] != year or week_end.isocalendar()[0] != year:
-                continue
+    fetch_fn = _fetch_data_cached if use_cache else _fetch_data_uncached
 
-            from_date = week_start.strftime("%Y-%m-%dT00:00:00+01:00")
-            to_date = week_end.strftime("%Y-%m-%dT23:59:59+01:00")
+    def _fetch_one(week_num: int, point_id: str, from_date: str, to_date: str):
+        query = WEEKLY_QUERY_TEMPLATE.format(point_id=point_id, from_date=from_date, to_date=to_date)
+        return week_num, point_id, fetch_fn(query, timeout_s)
 
-            week_data: Dict[str, float] = {}
-            week_cov: Dict[str, float] = {}
-            for point_id in point_ids:
-                query = WEEKLY_QUERY_TEMPLATE.format(point_id=point_id, from_date=from_date, to_date=to_date)
-                data = fetch_data(query, timeout_s, use_cache)
+    max_workers = min(len(valid_weeks) * len(point_ids), 12)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_fetch_one, week_num, point_id, from_date, to_date): (week_num, point_id)
+            for week_num, from_date, to_date in valid_weeks
+            for point_id in point_ids
+        }
+        for future in as_completed(futures):
+            try:
+                week_num, point_id, data = future.result()
                 if data and data.get("data", {}).get("trafficData"):
                     edges = data["data"]["trafficData"]["volume"]["byDay"]["edges"] or []
                     total_volume = 0.0
@@ -319,16 +340,14 @@ def fetch_weekly_traffic_data(
                         if cov is not None:
                             cov_sum += float(cov)
                             cov_days += 1
+                    week_key = f"Uke {week_num}"
                     if valid_days:
-                        week_data[point_id] = total_volume / valid_days
+                        result.setdefault(week_key, {})[point_id] = total_volume / valid_days
                     if cov_days:
-                        week_cov[point_id] = cov_sum / cov_days
-            if week_data:
-                result[f"Uke {week_num}"] = week_data
-            if week_cov:
-                cov_result[f"Uke {week_num}"] = week_cov
-        except Exception as e:
-            logger.error("Feil ved henting av ukesdata for uke %s: %s", week_num, str(e))
+                        cov_result.setdefault(week_key, {})[point_id] = cov_sum / cov_days
+            except Exception as e:
+                wn, pid = futures[future]
+                logger.error("Feil ved henting av ukesdata for uke %s, punkt %s: %s", wn, pid, str(e))
     return result, cov_result
 
 
@@ -759,7 +778,7 @@ def build_excel_report(
     ws_summary["A1"].font = title_font
     ws_summary["A2"] = f"Målepunkt: {point}"
     ws_summary["A3"] = f"Analysetype: {comparison_mode}"
-    ws_summary["A4"] = f"År: {','.join(map(str, year_list)) if comparison_mode == 'Sammenlign år' else str(year)}"
+    ws_summary["A4"] = f"År: {','.join(map(str, year_list)) if comparison_mode == COMPARE_YEARS else str(year)}"
     ws_summary["A5"] = f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     ws_summary["A6"] = f"Min. dekning: {coverage_threshold:.0f}%"
     for r in range(2, 7):
@@ -774,7 +793,7 @@ def build_excel_report(
         ("Generert", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("Målepunkt", point),
         ("Analysetype", comparison_mode),
-        ("År", ",".join(map(str, year_list)) if comparison_mode == "Sammenlign år" else str(year)),
+        ("År", ",".join(map(str, year_list)) if comparison_mode == COMPARE_YEARS else str(year)),
         ("Punkt-IDer", ", ".join(point_ids)),
         ("Timeout (s)", str(timeout_s)),
         ("Cache", "Ja" if use_cache else "Nei"),
@@ -791,7 +810,7 @@ def build_excel_report(
 
     # Summary - yearly totals from df (no extra API calls)
     year_cols_in_df = sorted([int(c) for c in df.columns if str(c).isdigit()])
-    if comparison_mode != "Sammenlign uker" and year_cols_in_df:
+    if comparison_mode != COMPARE_WEEKS and year_cols_in_df:
         ws_summary["A8"] = "Årsoppsummering (beregnet fra månedsdata)"
         ws_summary["A8"].font = Font(bold=True, size=12)
         ws_summary.append(["År", "Sum (mnd)", "Måneder", "Dager dekket", "Snitt per døgn", "Helårsestimat", "YoY (%)"])
@@ -803,7 +822,7 @@ def build_excel_report(
             avg_per_day = (total / days_covered) if days_covered else None
             helar = None
             if avg_per_day is not None and not pd.isna(avg_per_day):
-                helar = float(avg_per_day) * (366 if calendar.isleap(int(y)) else 365)
+                helar = float(avg_per_day) * days_in_year(int(y))
             yoy = None
             if prev_estimate and helar and prev_estimate != 0:
                 yoy = (helar - prev_estimate) / prev_estimate * 100
@@ -855,8 +874,8 @@ def build_excel_report(
     style_header_row(ws_data, row=1)
 
     # Totals sheet (if applicable)
-    if comparison_mode != "Sammenlign uker":
-        years_for_totals = year_list if comparison_mode == "Sammenlign år" else [year]
+    if comparison_mode != COMPARE_WEEKS:
+        years_for_totals = year_list if comparison_mode == COMPARE_YEARS else [year]
         totals_df = compute_monthly_totals_table(df, years_for_totals)
         ws_tot = wb.create_sheet("Totals")
         ws_tot.append(list(totals_df.columns))
@@ -889,8 +908,8 @@ def build_excel_report(
             ws_tot.add_chart(chart, "H2")
 
     # Coverage sheets (on-demand for a selected year)
-    if comparison_mode != "Sammenlign uker":
-        selected_year = max(year_list) if comparison_mode == "Sammenlign år" else year
+    if comparison_mode != COMPARE_WEEKS:
+        selected_year = max(year_list) if comparison_mode == COMPARE_YEARS else year
         traffic_by_point = fetch_batch_traffic_data(point_ids, int(selected_year), timeout_s, use_cache)
         metrics = extract_point_monthly_metrics(traffic_by_point, int(selected_year))
         if not metrics.empty:
@@ -1208,7 +1227,7 @@ def build_pdf_report(
             f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"Målepunkt: {point}\n"
             f"Analysetype: {comparison_mode}\n"
-            f"År: {','.join(map(str, year_list)) if comparison_mode == 'Sammenlign år' else str(year)}\n"
+            f"År: {','.join(map(str, year_list)) if comparison_mode == COMPARE_YEARS else str(year)}\n"
             f"Min. dekning: {coverage_threshold:.0f}%\n"
             f"Estimer manglende punkt: {'Ja' if estimate_missing_points else 'Nei'}\n"
             f"Punkt-IDer: {', '.join(point_ids)}"
@@ -1217,7 +1236,7 @@ def build_pdf_report(
 
     # Year summary (derived from df; no extra API calls)
     year_cols_in_df = sorted([int(c) for c in df.columns if str(c).isdigit()])
-    if comparison_mode != "Sammenlign uker" and year_cols_in_df:
+    if comparison_mode != COMPARE_WEEKS and year_cols_in_df:
         pdf.ln(2)
         pdf.set_font("Helvetica", "B", 12)
         pdf.cell(0, 8, pdf_safe_text("Årsoppsummering (beregnet fra månedsdata)"), ln=True)
@@ -1229,7 +1248,7 @@ def build_pdf_report(
             avg_per_day = (total / days_covered) if days_covered else None
             estimate = None
             if avg_per_day is not None and not pd.isna(avg_per_day):
-                estimate = float(avg_per_day) * (366 if calendar.isleap(int(y)) else 365)
+                estimate = float(avg_per_day) * days_in_year(int(y))
                 estimates.append((int(y), estimate))
             yoy_txt = ""
             if prev_estimate and estimate and prev_estimate != 0:
@@ -1263,8 +1282,8 @@ def build_pdf_report(
             except Exception as exc:
                 logger.warning("PDF: helårsestimat-graf feilet: %s", exc)
 
-    if comparison_mode != "Sammenlign uker":
-        selected_year = max(year_list) if comparison_mode == "Sammenlign år" else year
+    if comparison_mode != COMPARE_WEEKS:
+        selected_year = max(year_list) if comparison_mode == COMPARE_YEARS else year
         traffic_by_point = fetch_batch_traffic_data(point_ids, int(selected_year), timeout_s, use_cache)
         metrics = extract_point_monthly_metrics(traffic_by_point, int(selected_year))
         totals_ci = totals_with_uncertainty_from_metrics(metrics)
@@ -2151,14 +2170,14 @@ def render_point_basis_note(coverage_df: pd.DataFrame) -> None:
 
 def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_list: List[int], year: int, point_ids: List[str], timeout_s: int, use_cache: bool):
     st.subheader("🧮 Totale passeringer (samlet trafikk)")
-    if comparison_mode == "Sammenlign uker":
+    if comparison_mode == COMPARE_WEEKS:
         st.info(
             "Ukesvisning viser per nå gjennomsnitt per døgn (sum av punkter). "
             "Totale uketall krever at vi vet hvor mange gyldige dager som inngår i snittet."
         )
         return
 
-    years_for_totals = year_list if comparison_mode == "Sammenlign år" else [year]
+    years_for_totals = year_list if comparison_mode == COMPARE_YEARS else [year]
     totals_df = compute_monthly_totals_table(df, years_for_totals)
     st.caption("Beregning: (månedsvis gjennomsnitt per døgn) × (antall dager i måneden), summert per måned.")
 
@@ -2184,7 +2203,7 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
             else:
                 st.metric("Måneder med data", f"{months_present}/12")
 
-        if comparison_mode == "Sammenlign år" and len(year_cols) >= 2:
+        if comparison_mode == COMPARE_YEARS and len(year_cols) >= 2:
             prev_year = sorted(year_cols)[-2]
             prev_total, _, _ = calculate_yearly_total_from_monthly_averages(df, int(prev_year))
             if prev_total:
@@ -2252,7 +2271,7 @@ def render_data_quality_tab(
         "Lav dekning kan gi skjevheter. Usikkerhet er indikativ og basert på oppgitte konfidensintervaller."
     )
 
-    if comparison_mode == "Sammenlign uker":
+    if comparison_mode == COMPARE_WEEKS:
         cov = coverage_summary if coverage_summary is not None else pd.DataFrame()
         if cov is None or cov.empty:
             st.warning("Fant ingen dekningsdata for ukesvisning.")
@@ -2301,7 +2320,7 @@ def render_data_quality_tab(
         st.dataframe(cov.copy(), use_container_width=True, hide_index=True)
         return
 
-    years = year_list if comparison_mode == "Sammenlign år" else [year]
+    years = year_list if comparison_mode == COMPARE_YEARS else [year]
     selected_year = st.selectbox("År", options=years, index=len(years) - 1, key="dq_year")
 
     traffic_by_point = fetch_batch_traffic_data(point_ids, int(selected_year), timeout_s, use_cache)
@@ -2458,7 +2477,7 @@ def main():
 
         comparison_mode = st.radio(
             "Velg analysetype",
-            ["Sammenlign år", "Sammenlign måneder", "Sammenlign uker"],
+            [COMPARE_YEARS, COMPARE_MONTHS, COMPARE_WEEKS],
             key="comparison_mode",
         )
 
@@ -2473,7 +2492,6 @@ def main():
                 help="Når noen (men ikke alle) målepunkter mangler data i en måned, skaleres totalen opp basert på antall punkter med data. Bruk med varsomhet.",
             )
 
-        include_ramp = True
         direction = "Begge retninger"
         has_optional_points = point in {"Ryfast (sum tunneler)", "Hundvågtunnelen"}
         include_ramp = st.checkbox(
@@ -2495,9 +2513,9 @@ def main():
         months: List[int] = []
         weeks: List[int] = []
 
-        if comparison_mode == "Sammenlign år":
+        if comparison_mode == COMPARE_YEARS:
             year_input = st.text_input("År (komma-separert)", value=DEFAULT_YEARS, key="years_input")
-        elif comparison_mode == "Sammenlign måneder":
+        elif comparison_mode == COMPARE_MONTHS:
             year = st.selectbox("År", list(YEAR_RANGE), index=list(YEAR_RANGE).index(2025) if 2025 in YEAR_RANGE else 0, key="months_year")
             months = st.multiselect(
                 "Velg måneder",
@@ -2533,7 +2551,7 @@ def main():
         return TRAFFIC_POINTS["Bybrua"]["ids"][direction]
 
     if submitted:
-        if comparison_mode == "Sammenlign år":
+        if comparison_mode == COMPARE_YEARS:
             try:
                 year_list = [int(y.strip()) for y in year_input.split(",") if y.strip()]
             except Exception:
@@ -2546,22 +2564,22 @@ def main():
             else:
                 year = year_list[-1]
 
-        if comparison_mode == "Sammenlign måneder" and not months:
+        if comparison_mode == COMPARE_MONTHS and not months:
             st.sidebar.warning("Velg minst én måned")
             st.session_state.last_result = None
-        if comparison_mode == "Sammenlign uker" and not weeks:
+        if comparison_mode == COMPARE_WEEKS and not weeks:
             st.sidebar.warning("Velg minst én uke")
             st.session_state.last_result = None
 
         point_ids = resolve_point_ids()
 
-        if (comparison_mode == "Sammenlign år" and year_list) or (comparison_mode != "Sammenlign år"):
+        if (comparison_mode == COMPARE_YEARS and year_list) or (comparison_mode != COMPARE_YEARS):
             with st.spinner("🔄 Behandler data..."):
-                if comparison_mode == "Sammenlign år":
+                if comparison_mode == COMPARE_YEARS:
                     result_tuple = process_data_for_years(point_ids, year_list, timeout_s, use_cache, estimate_missing_points)
                     df, coverage_summary = result_tuple
                     title = f"Årlig sammenligning for {point}"
-                elif comparison_mode == "Sammenlign måneder":
+                elif comparison_mode == COMPARE_MONTHS:
                     result_tuple = process_data_for_months(point_ids, year, months, timeout_s, use_cache, estimate_missing_points)
                     if result_tuple is None:
                         df, coverage_summary = None, pd.DataFrame()
