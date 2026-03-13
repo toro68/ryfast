@@ -4,6 +4,7 @@ import argparse
 import calendar
 import csv
 import re
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ import requests
 
 
 URL = "https://trafikkdata-api.atlas.vegvesen.no"
+API_MAX_RETRIES = 3
+API_RETRY_DELAY = 1
 
 
 TRAFFIC_POINT_GROUPS: Dict[str, List[str]] = {
@@ -88,12 +91,21 @@ class FerdeMonthRow:
 
 
 def _gql(query: str, timeout_s: int = 30) -> Dict:
-    resp = requests.post(URL, json={"query": query}, timeout=timeout_s)
-    resp.raise_for_status()
-    data = resp.json()
-    if "errors" in data:
-        raise RuntimeError(data["errors"][0].get("message", "GraphQL error"))
-    return data["data"]
+    last_error: Optional[Exception] = None
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            resp = requests.post(URL, json={"query": query}, timeout=timeout_s)
+            resp.raise_for_status()
+            data = resp.json()
+            if "errors" in data:
+                raise RuntimeError(data["errors"][0].get("message", "GraphQL error"))
+            return data["data"]
+        except (requests.RequestException, RuntimeError) as exc:
+            last_error = exc
+            if attempt == API_MAX_RETRIES - 1:
+                break
+            time.sleep(API_RETRY_DELAY * (attempt + 1))
+    raise RuntimeError(f"Vegvesen API-kall feilet etter {API_MAX_RETRIES} forsøk") from last_error
 
 
 def fetch_vegvesen_monthly_totals(
@@ -332,7 +344,12 @@ def main() -> int:
     ferde_path = Path(args.ferde_xlsx)
     out_path = Path(args.out)
 
-    years = [int(y.strip()) for y in args.years.split(",") if y.strip()]
+    try:
+        years = [int(y.strip()) for y in args.years.split(",") if y.strip()]
+    except ValueError as exc:
+        raise SystemExit("Ugyldig --years. Bruk f.eks. 2024,2025") from exc
+    if not years:
+        raise SystemExit("Ugyldig --years. Oppgi minst ett år.")
 
     ferde_rows = parse_ferde_ryfast_sheet(read_xlsx_sheet_rows(ferde_path))
     ferde_by_ym: Dict[Tuple[int, int], FerdeMonthRow] = {
