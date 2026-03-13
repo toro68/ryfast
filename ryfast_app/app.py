@@ -270,7 +270,8 @@ def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, us
             executor.submit(fetch_fn, QUERY_TEMPLATE.format(point_id=pid, year=year), timeout_s): pid
             for pid in point_ids
         }
-        for future, point_id in future_to_point.items():
+        for future in as_completed(future_to_point):
+            point_id = future_to_point[future]
             try:
                 data = future.result()
                 if data and data.get("data", {}).get("trafficData"):
@@ -1338,13 +1339,16 @@ def build_pdf_report(
             for _, r in totals_ci.iterrows():
                 if pd.isna(r["total"]):
                     continue
+                coverage_text = f"dekning {float(r['coverage_pct']):.1f}%" if pd.notna(r["coverage_pct"]) else "dekning N/A"
+                lower_text = int(round(r["total_lower"])) if pd.notna(r["total_lower"]) else None
+                upper_text = int(round(r["total_upper"])) if pd.notna(r["total_upper"]) else None
                 pdf.cell(
                     0,
                     6,
                     pdf_safe_text(
                         f"{r['month_name']}: {int(round(r['total'])):,}  "
-                        f"[{int(round(r['total_lower'])):,} – {int(round(r['total_upper'])):,}]  "
-                        f"dekning {r['coverage_pct']:.1f}%"
+                        f"[{format_number(lower_text) if lower_text is not None else 'N/A'} – {format_number(upper_text) if upper_text is not None else 'N/A'}]  "
+                        f"{coverage_text}"
                     ),
                     ln=True,
                 )
