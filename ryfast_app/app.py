@@ -37,7 +37,6 @@ import streamlit as st
 from fpdf import FPDF
 
 try:
-    import openpyxl  # noqa: F401  # pyright: ignore[reportUnusedImport]  # pylint: disable=unused-import
     from openpyxl import Workbook
     from openpyxl.chart import BarChart, LineChart, Reference
     from openpyxl.formatting.rule import CellIsRule
@@ -45,7 +44,6 @@ try:
 
     OPENPYXL_AVAILABLE = True
 except Exception:
-    openpyxl = None  # type: ignore[assignment]
     Workbook = None  # type: ignore[assignment]
     BarChart = None  # type: ignore[assignment]
     LineChart = None  # type: ignore[assignment]
