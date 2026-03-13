@@ -1805,23 +1805,33 @@ def _render_pairwise_year_comparison(df: pd.DataFrame) -> None:
         st.info("Fant ingen perioder med sammenlignbare verdier for de valgte årene.")
         return
 
-    total_baseline = compare_df["Baseline"].sum(min_count=1)
-    total_compare = compare_df["Sammenligning"].sum(min_count=1)
-    total_delta = total_compare - total_baseline if pd.notna(total_baseline) and pd.notna(total_compare) else np.nan
-    total_delta_pct = (total_delta / total_baseline * 100.0) if pd.notna(total_baseline) and total_baseline else np.nan
+    total_baseline, _, _ = calculate_yearly_total_from_monthly_averages(df, int(baseline_year))
+    total_compare, compare_months, _ = calculate_yearly_total_from_monthly_averages(df, int(compare_year))
+    total_delta = total_compare - total_baseline
+    total_delta_pct = (total_delta / total_baseline * 100.0) if total_baseline else np.nan
     best_row = compare_df.loc[compare_df["Endring"].idxmax()]
     worst_row = compare_df.loc[compare_df["Endring"].idxmin()]
     label_col = _period_label_column(df) or "Periode"
+    period_label = "Måned" if label_col == "Month Name" else ("Uke" if label_col == "Week" else "Periode")
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric(f"{compare_year} vs {baseline_year}", format_number(total_compare), None if pd.isna(total_delta_pct) else f"{total_delta_pct:+.1f}%")
+        suffix = "hittil" if compare_months < 12 else "helår"
+        st.metric(
+            f"Totalt {compare_year} ({suffix})",
+            format_number(total_compare),
+            None if pd.isna(total_delta_pct) else f"{total_delta_pct:+.1f}% vs {baseline_year}",
+        )
     with m2:
-        st.metric("Absolutt endring", format_number(total_delta) if pd.notna(total_delta) else "N/A")
+        st.metric("Differanse i totaltrafikk", format_number(total_delta) if pd.notna(total_delta) else "N/A")
     with m3:
-        st.metric("Sterkeste periode", str(best_row[label_col]), f"{float(best_row['Endring']):+,.0f}".replace(",", " "))
+        st.metric(f"Sterkeste {period_label.lower()}", str(best_row[label_col]), f"{float(best_row['Endring']):+,.0f}".replace(",", " "))
     with m4:
-        st.metric("Svakeste periode", str(worst_row[label_col]), f"{float(worst_row['Endring']):+,.0f}".replace(",", " "))
+        st.metric(f"Svakeste {period_label.lower()}", str(worst_row[label_col]), f"{float(worst_row['Endring']):+,.0f}".replace(",", " "))
+
+    st.caption(
+        "Kortene over viser totaltrafikk beregnet fra måneds-ÅDT. Grafen under viser periodevis endring i ÅDT mellom årene."
+    )
 
     fig = px.bar(
         compare_df,
