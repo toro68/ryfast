@@ -9,6 +9,9 @@ def run_streamlit_app() -> None:
     """
     Convenience entrypoint for environments that expect a root `main.py`.
 
+    Deprecated: prefer `streamlit run streamlit_app.py`. Kept until it is
+    confirmed that no deployment invokes `python main.py` directly.
+
     Equivalent to:
       streamlit run ryfast_app/app.py
     """

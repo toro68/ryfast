@@ -4,7 +4,6 @@ import argparse
 import calendar
 import csv
 import re
-import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,33 +11,18 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import xml.etree.ElementTree as ET
 
-import requests
-
-
-URL = "https://trafikkdata-api.atlas.vegvesen.no"
-API_MAX_RETRIES = 3
-API_RETRY_DELAY = 1
-
+from ryfast_app.config import (
+    HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE,
+    QUERY_TEMPLATE,
+    TRAFFIC_POINTS,
+)
+from ryfast_app.vegvesen_api import post_graphql
 
 TRAFFIC_POINT_GROUPS: Dict[str, List[str]] = {
-    "Ryfast (sum tunneler, inkl pårampe)": [
-        # Ryfylketunnelen (begge retninger)
-        "99040V2725982",
-        "00911V2725983",
-        # Hundvågtunnelen (begge retninger + pårampe)
-        "10239V2725979",
-        "62464V2725991",
-        "92743V2726085",
-        "25926V2725990",
-    ],
-    "Hundvågtunnelen (inkl pårampe)": [
-        "10239V2725979",
-        "62464V2725991",
-        "92743V2726085",
-        "25926V2725990",
-    ],
-    "Hundvågtunnelen (uten pårampe)": ["10239V2725979", "92743V2726085"],
-    "Ryfylketunnelen": ["99040V2725982", "00911V2725983"],
+    "Ryfast (sum tunneler, inkl pårampe)": TRAFFIC_POINTS["Ryfast (sum tunneler)"]["ids"],
+    "Hundvågtunnelen (inkl pårampe)": TRAFFIC_POINTS["Hundvågtunnelen"]["ids"],
+    "Hundvågtunnelen (uten pårampe)": HUNDVAG_TUNNEL_IDS_UTEN_PÅRAMPE,
+    "Ryfylketunnelen": TRAFFIC_POINTS["Ryfylketunnelen"]["ids"],
 }
 
 
@@ -58,27 +42,6 @@ MONTH_NAME_TO_NUM = {
 }
 
 
-MONTH_QUERY = """
-query {{
-  trafficData(trafficRegistrationPointId: "{point_id}") {{
-    volume {{
-      average {{
-        daily {{
-          byMonth(year: {year}) {{
-            month
-            total {{
-              volume {{ average }}
-              coverage {{ percentage }}
-            }}
-          }}
-        }}
-      }}
-    }}
-  }}
-}}
-"""
-
-
 @dataclass(frozen=True)
 class FerdeMonthRow:
     """One monthly row parsed from the Ferde spreadsheet."""
@@ -88,24 +51,6 @@ class FerdeMonthRow:
     income_nok: int
     passages_total: int
     passages_exemptions: int
-
-
-def _gql(query: str, timeout_s: int = 30) -> Dict:
-    last_error: Optional[Exception] = None
-    for attempt in range(API_MAX_RETRIES):
-        try:
-            resp = requests.post(URL, json={"query": query}, timeout=timeout_s)
-            resp.raise_for_status()
-            data = resp.json()
-            if "errors" in data:
-                raise RuntimeError(data["errors"][0].get("message", "GraphQL error"))
-            return data["data"]
-        except (requests.RequestException, RuntimeError) as exc:
-            last_error = exc
-            if attempt == API_MAX_RETRIES - 1:
-                break
-            time.sleep(API_RETRY_DELAY * (attempt + 1))
-    raise RuntimeError(f"Vegvesen API-kall feilet etter {API_MAX_RETRIES} forsøk") from last_error
 
 
 def fetch_vegvesen_monthly_totals(
@@ -130,8 +75,8 @@ def fetch_vegvesen_monthly_totals(
     per_point_monthly: Dict[str, Dict[int, float]] = {pid: {} for pid in point_ids}
 
     for pid in point_ids:
-        query = MONTH_QUERY.format(point_id=pid, year=year)
-        td = _gql(query).get("trafficData")
+        query = QUERY_TEMPLATE.format(point_id=pid, year=year)
+        td = post_graphql(query).get("data", {}).get("trafficData")
         if not td:
             continue
         rows = td["volume"]["average"]["daily"]["byMonth"] or []
@@ -220,7 +165,7 @@ def read_xlsx_sheet_rows(  # pylint: disable=too-many-locals,too-many-branches
             if c.attrib.get("t") == "s":
                 try:
                     val = shared[int(raw)]
-                except Exception:
+                except (ValueError, IndexError):
                     val = raw
             else:
                 val = raw

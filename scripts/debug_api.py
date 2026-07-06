@@ -172,7 +172,7 @@ def test_weekly_data():
         
         data = response.json()
         if "errors" in data:
-            print(f"❌ GraphQL errors:")
+            print("❌ GraphQL errors:")
             for error in data["errors"]:
                 print(f"   • {error.get('message', error)}")
             return False

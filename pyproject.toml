@@ -8,7 +8,13 @@ extend-exclude = [
   "myenv",
 ]
 
+# BLE001 (bred except) tillates kun der en delfeil ikke skal velte helheten:
+# graf-/figurinnsetting i eksport, altair-vakter i UI, og session_state-flush i api.py.
 [tool.ruff.lint.per-file-ignores]
-"ryfast_app/app.py" = ["BLE001"]
+"ryfast_app/api.py" = ["BLE001"]
+"ryfast_app/exports/*.py" = ["BLE001"]
+"ryfast_app/ui/*.py" = ["BLE001"]
 "scripts/*.py" = ["BLE001"]
-"compare_vegvesen_ferde.py" = ["BLE001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
