@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ryfast_app.config import MONTH_NAMES, POINT_ID_LABELS
-from ryfast_app.processing import add_month_names, extract_point_monthly_metrics
+from ryfast_app.processing import add_month_names, assessable_months, extract_point_monthly_metrics
 
 
 def compute_monthly_coverage_summary(
@@ -15,8 +15,15 @@ def compute_monthly_coverage_summary(
     year: int,
     expected_point_ids: List[str],
 ) -> pd.DataFrame:
+    """Dekning per måned for et år.
+
+    Kolonnen `is_assessable` er False for måneder som ennå ikke er ferdige
+    (inneværende og fremtidige måneder). De har ingen data å mangle, og skal
+    derfor ikke telles som datahull av bannere eller varsler.
+    """
     metrics = extract_point_monthly_metrics(traffic_by_point, year)
     expected_points = len(expected_point_ids)
+    assessable = set(assessable_months(year))
 
     if metrics.empty:
         return pd.DataFrame(
@@ -29,6 +36,7 @@ def compute_monthly_coverage_summary(
                 "points_present_pct": [0.0] * 12,
                 "mean_coverage_pct": [np.nan] * 12,
                 "min_coverage_pct": [np.nan] * 12,
+                "is_assessable": [m in assessable for m in range(1, 13)],
             }
         )
 
@@ -51,6 +59,7 @@ def compute_monthly_coverage_summary(
         out["points_present"].astype(float) / float(expected_points) * 100.0,
         np.nan,
     )
+    out["is_assessable"] = out["month"].isin(assessable)
     return out
 
 def compute_weekly_coverage_summary(
@@ -79,6 +88,9 @@ def compute_weekly_coverage_summary(
                 "points_present_pct": (points_present / expected_points * 100.0) if expected_points else np.nan,
                 "mean_coverage_pct": (sum(cov_values) / len(cov_values)) if cov_values else np.nan,
                 "min_coverage_pct": min(cov_values) if cov_values else np.nan,
+                # Radene finnes bare for uker API-et returnerte data for, så alle
+                # kan vurderes. Kolonnen holdes for felles bannerlogikk.
+                "is_assessable": True,
             }
         )
     return pd.DataFrame(rows)

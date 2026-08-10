@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
 
 from ryfast_app.api import fetch_batch_traffic_data
 from ryfast_app.config import (
@@ -36,6 +37,30 @@ from ryfast_app.processing import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PDF_TEXT_REPLACEMENTS = {
+    "–": "-",  # en dash
+    "—": "-",  # em dash
+    "−": "-",  # minus sign
+    " ": " ",  # nbsp
+    "‘": "'",  # left single quote
+    "’": "'",  # right single quote
+    "“": '"',  # left double quote
+    "”": '"',  # right double quote
+    "…": "...",  # ellipsis
+}
+
+
+def pdf_safe_text(text: str) -> str:
+    """Erstatt typografiske tegn og fall tilbake til latin-1 (kjernefontene)."""
+    for src, dst in _PDF_TEXT_REPLACEMENTS.items():
+        text = text.replace(src, dst)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _pdf_line(pdf: "FPDF", text: str, height: float = 6) -> None:
+    """Skriv én linje og flytt til neste (erstatter deprecated ln=True)."""
+    pdf.cell(0, height, pdf_safe_text(text), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 
 def _pdf_embed_figure(pdf: "FPDF", fig: "go.Figure") -> None:
@@ -70,22 +95,6 @@ def build_pdf_report(
     ryfast_include_ramp: Optional[bool] = None,
     estimate_missing_points: bool = False,
 ) -> bytes:
-    def pdf_safe_text(text: str) -> str:
-        replacements = {
-            "\u2013": "-",  # en dash
-            "\u2014": "-",  # em dash
-            "\u2212": "-",  # minus sign
-            "\u00a0": " ",  # nbsp
-            "\u2018": "'",  # left single quote
-            "\u2019": "'",  # right single quote
-            "\u201c": '"',  # left double quote
-            "\u201d": '"',  # right double quote
-            "\u2026": "...",  # ellipsis
-        }
-        for src, dst in replacements.items():
-            text = text.replace(src, dst)
-        return text.encode("latin-1", errors="replace").decode("latin-1")
-
     include_ramp = (
         bool(st.session_state.get("ryfast_include_ramp", True)) if ryfast_include_ramp is None else bool(ryfast_include_ramp)
     )
@@ -94,7 +103,7 @@ def build_pdf_report(
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, pdf_safe_text("Ryfast - rapport"), ln=True)
+    _pdf_line(pdf, "Ryfast - rapport", height=10)
     pdf.set_font("Helvetica", "", 11)
     pdf.multi_cell(
         0,
@@ -115,7 +124,7 @@ def build_pdf_report(
     if comparison_mode != COMPARE_WEEKS and year_cols_in_df:
         pdf.ln(2)
         pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, pdf_safe_text("Årsoppsummering (beregnet fra månedsdata)"), ln=True)
+        _pdf_line(pdf, "Årsoppsummering (beregnet fra månedsdata)", height=8)
         pdf.set_font("Helvetica", "", 10)
         estimates: List[Tuple[int, float]] = []
         prev_estimate: Optional[float] = None
@@ -131,15 +140,11 @@ def build_pdf_report(
                 yoy = (estimate - prev_estimate) / prev_estimate * 100
                 yoy_txt = f"  YoY {yoy:+.1f}%"
             prev_estimate = estimate if estimate is not None else prev_estimate
-            pdf.cell(
-                0,
-                6,
-                pdf_safe_text(
-                    f"{int(y)}: sum {int(round(total)):,} (mnd={int(months_present)}, dager={int(days_covered)})"
-                    + (f"  helår {int(round(estimate)):,}" if estimate is not None else "")
-                    + yoy_txt
-                ),
-                ln=True,
+            _pdf_line(
+                pdf,
+                f"{int(y)}: sum {int(round(total)):,} (mnd={int(months_present)}, dager={int(days_covered)})"
+                + (f"  helår {int(round(estimate)):,}" if estimate is not None else "")
+                + yoy_txt,
             )
 
         if len(estimates) >= 1:
@@ -203,12 +208,7 @@ def build_pdf_report(
         if not totals_ci.empty:
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 12)
-            pdf.cell(
-                0,
-                8,
-                pdf_safe_text(f"Totale passeringer (indikativ usikkerhet) - {selected_year}"),
-                ln=True,
-            )
+            _pdf_line(pdf, f"Totale passeringer (indikativ usikkerhet) - {selected_year}", height=8)
             pdf.set_font("Helvetica", "", 10)
             for _, r in totals_ci.iterrows():
                 if pd.isna(r["total"]):
@@ -216,33 +216,29 @@ def build_pdf_report(
                 coverage_text = f"dekning {float(r['coverage_pct']):.1f}%" if pd.notna(r["coverage_pct"]) else "dekning N/A"
                 lower_text = int(round(r["total_lower"])) if pd.notna(r["total_lower"]) else None
                 upper_text = int(round(r["total_upper"])) if pd.notna(r["total_upper"]) else None
-                pdf.cell(
-                    0,
-                    6,
-                    pdf_safe_text(
-                        f"{r['month_name']}: {int(round(r['total'])):,}  "
-                        f"[{format_number(lower_text) if lower_text is not None else 'N/A'} – {format_number(upper_text) if upper_text is not None else 'N/A'}]  "
-                        f"{coverage_text}"
-                    ),
-                    ln=True,
+                _pdf_line(
+                    pdf,
+                    f"{r['month_name']}: {int(round(r['total'])):,}  "
+                    f"[{format_number(lower_text) if lower_text is not None else 'N/A'} – {format_number(upper_text) if upper_text is not None else 'N/A'}]  "
+                    f"{coverage_text}",
                 )
 
         # Coverage summary (uses already-fetched metrics)
         if metrics is not None and not metrics.empty and metrics["coverage_pct"].notna().any():
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 12)
-            pdf.cell(0, 8, pdf_safe_text(f"Dekning og datakvalitet - {selected_year}"), ln=True)
+            _pdf_line(pdf, f"Dekning og datakvalitet - {selected_year}", height=8)
             pdf.set_font("Helvetica", "", 10)
             below = metrics[(metrics["coverage_pct"].notna()) & (metrics["coverage_pct"] < float(coverage_threshold))].copy()
-            pdf.cell(0, 6, pdf_safe_text(f"Snitt dekning: {metrics['coverage_pct'].mean():.1f}%"), ln=True)
-            pdf.cell(0, 6, pdf_safe_text(f"Observasjoner under terskel ({coverage_threshold:.0f}%): {len(below)}"), ln=True)
+            _pdf_line(pdf, f"Snitt dekning: {metrics['coverage_pct'].mean():.1f}%")
+            _pdf_line(pdf, f"Observasjoner under terskel ({coverage_threshold:.0f}%): {len(below)}")
 
             if not below.empty:
                 worst = below.sort_values("coverage_pct", ascending=True).head(8)
                 pdf.ln(1)
-                pdf.cell(0, 6, pdf_safe_text("Lavest dekning (utvalg):"), ln=True)
+                _pdf_line(pdf, "Lavest dekning (utvalg):")
                 for r in worst.itertuples(index=False):
-                    pdf.cell(0, 6, pdf_safe_text(f"- {r.month_name}: {r.point_label} {float(r.coverage_pct):.1f}%"), ln=True)
+                    _pdf_line(pdf, f"- {r.month_name}: {r.point_label} {float(r.coverage_pct):.1f}%")
 
             if not totals_ci.empty and totals_ci["coverage_pct"].notna().any():
                 try:
@@ -311,16 +307,20 @@ def build_pdf_report(
                 if cov_by_group_df is not None and not cov_by_group_df.empty:
                     pdf.ln(2)
                     pdf.set_font("Helvetica", "B", 12)
-                    pdf.cell(0, 8, pdf_safe_text(f"Dekning per tunnel (snitt) - {selected_year}"), ln=True)
+                    _pdf_line(pdf, f"Dekning per tunnel (snitt) - {selected_year}", height=8)
                     pdf.set_font("Helvetica", "", 10)
-                    for r in cov_by_group_df.itertuples(index=False):
+                    # iterrows() framfor itertuples(): "Month Name" er ikke en gyldig
+                    # Python-identifikator og blir omdøpt til "_1" i namedtuples.
+                    for _, row in cov_by_group_df.iterrows():
                         try:
-                            month_name = r._asdict().get("Month Name", "")
-                            ryf = getattr(r, "Ryfylketunnelen", np.nan)
-                            hund = getattr(r, "Hundvågtunnelen", np.nan)
+                            month_name = row.get("Month Name", "")
+                            ryf = row.get("Ryfylketunnelen", np.nan)
+                            hund = row.get("Hundvågtunnelen", np.nan)
                             if pd.isna(ryf) and pd.isna(hund):
                                 continue
-                            pdf.cell(0, 6, pdf_safe_text(f"{month_name}: Ryfylke {float(ryf):.1f}%  Hundvåg {float(hund):.1f}%"), ln=True)
+                            ryf_txt = f"{float(ryf):.1f}%" if pd.notna(ryf) else "N/A"
+                            hund_txt = f"{float(hund):.1f}%" if pd.notna(hund) else "N/A"
+                            _pdf_line(pdf, f"{month_name}: Ryfylke {ryf_txt}  Hundvåg {hund_txt}")
                         except Exception as exc:
                             logger.warning("PDF: tunnel-dekning per måned feilet: %s", exc)
                             continue
@@ -349,12 +349,12 @@ def build_pdf_report(
             if warnings:
                 pdf.ln(2)
                 pdf.set_font("Helvetica", "B", 12)
-                pdf.cell(0, 8, pdf_safe_text("Data Quality Warnings"), ln=True)
+                _pdf_line(pdf, "Data Quality Warnings", height=8)
                 pdf.set_font("Helvetica", "", 10)
                 for w in warnings[:15]:
                     pdf.multi_cell(0, 5, pdf_safe_text(f"- {w}"))
         except Exception as exc:
             logger.warning("PDF: feil ved generering av varselseksjon: %s", exc)
 
-    output = pdf.output(dest="S")
+    output = pdf.output()
     return bytes(output) if isinstance(output, (bytes, bytearray)) else output.encode("latin-1")

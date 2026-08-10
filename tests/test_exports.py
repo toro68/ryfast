@@ -6,10 +6,10 @@ import openpyxl
 import pandas as pd
 import pytest
 
-from ryfast_app.config import COMPARE_YEARS
+from ryfast_app.config import COMPARE_YEARS, TRAFFIC_POINTS
 from ryfast_app.exports import excel as excel_mod
 from ryfast_app.exports import pdf as pdf_mod
-from tests.fixtures import two_point_year
+from tests.fixtures import month_entry, two_point_year
 
 
 @pytest.fixture
@@ -100,3 +100,42 @@ class TestBuildPdfReport:
         )
         assert isinstance(data, (bytes, bytearray))
         assert bytes(data).startswith(b"%PDF")
+
+    def test_tunneldekning_har_maanedsnavn(self, comparison_df, monkeypatch):
+        # Regresjon: itertuples() omdøper "Month Name" til "_1", så linjene ble
+        # skrevet som ": Ryfylke 99.0% ..." uten måned.
+        ryfylke = TRAFFIC_POINTS["Ryfylketunnelen"]["ids"][0]
+        hundvag = TRAFFIC_POINTS["Hundvågtunnelen"]["ids"][0]
+        traffic = {
+            ryfylke: [month_entry(1, 1000.0, coverage=99.0), month_entry(2, 1100.0, coverage=97.0)],
+            hundvag: [month_entry(1, 2000.0, coverage=98.0), month_entry(2, 2100.0, coverage=96.0)],
+        }
+        monkeypatch.setattr(pdf_mod, "fetch_batch_traffic_data", lambda *a, **k: traffic)
+        monkeypatch.setattr(pdf_mod, "_pdf_embed_figure", lambda pdf, fig: None)
+
+        linjer = []
+        ekte_linje = pdf_mod._pdf_line
+
+        def _fanget(pdf, text, height=6):
+            linjer.append(text)
+            ekte_linje(pdf, text, height)
+
+        monkeypatch.setattr(pdf_mod, "_pdf_line", _fanget)
+
+        pdf_mod.build_pdf_report(
+            comparison_df,
+            point="Ryfast (sum tunneler)",
+            comparison_mode=COMPARE_YEARS,
+            year_list=[2024, 2025],
+            year=2025,
+            point_ids=[ryfylke, hundvag],
+            timeout_s=5,
+            use_cache=False,
+            coverage_threshold=50.0,
+            ryfast_include_ramp=True,
+        )
+        tunnel_linjer = [line for line in linjer if "Ryfylke " in line and "Hundvåg " in line]
+        assert tunnel_linjer, "fant ingen linjer for tunnel-dekning"
+        assert tunnel_linjer[0].startswith("Januar: ")
+        assert "99.0%" in tunnel_linjer[0] and "98.0%" in tunnel_linjer[0]
+        assert any(line.startswith("Februar: ") for line in tunnel_linjer)

@@ -163,29 +163,33 @@ def main():
         return TRAFFIC_POINTS["Bybrua"]["ids"][direction]
 
     if submitted:
+        # Valider før henting: uten gyldig utvalg skal vi ikke kalle API-et og
+        # ende opp med et generisk «ingen data»-varsel.
+        selection_ok = True
         if comparison_mode == COMPARE_YEARS:
             try:
                 year_list = [int(y.strip()) for y in year_input.split(",") if y.strip()]
             except ValueError:
                 st.sidebar.error("Ugyldig format. Bruk f.eks. 2024,2025")
-                st.session_state.last_result = None
                 year_list = []
             if not year_list:
                 st.sidebar.warning("Velg minst ett år")
-                st.session_state.last_result = None
+                selection_ok = False
             else:
                 year = year_list[-1]
-
-        if comparison_mode == COMPARE_MONTHS and not months:
+        elif comparison_mode == COMPARE_MONTHS and not months:
             st.sidebar.warning("Velg minst én måned")
-            st.session_state.last_result = None
-        if comparison_mode == COMPARE_WEEKS and not weeks:
+            selection_ok = False
+        elif comparison_mode == COMPARE_WEEKS and not weeks:
             st.sidebar.warning("Velg minst én uke")
+            selection_ok = False
+
+        if not selection_ok:
             st.session_state.last_result = None
 
         point_ids = resolve_point_ids()
 
-        if (comparison_mode == COMPARE_YEARS and year_list) or (comparison_mode != COMPARE_YEARS):
+        if selection_ok:
             with st.spinner("🔄 Behandler data..."):
                 if comparison_mode == COMPARE_YEARS:
                     result_tuple = process_data_for_years(point_ids, year_list, timeout_s, use_cache, estimate_missing_points)
@@ -257,14 +261,14 @@ def main():
         numeric_cols = formatted_df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             formatted_df[col] = formatted_df[col].map(format_number)
-        st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+        st.dataframe(formatted_df, width="stretch", hide_index=True)
         if coverage_summary is not None and not coverage_summary.empty:
             with st.expander("🛡️ Datadekning (for perioden som vises)"):
                 cov_view = coverage_summary.copy()
                 for c in ["points_present_pct", "mean_coverage_pct", "min_coverage_pct"]:
                     if c in cov_view.columns:
                         cov_view[c] = pd.to_numeric(cov_view[c], errors="coerce").round(1)
-                st.dataframe(cov_view, use_container_width=True, hide_index=True)
+                st.dataframe(cov_view, width="stretch", hide_index=True)
 
     with tab3:
         render_totals_tab(df, point, comparison_mode, year_list, year, point_ids, timeout_s, use_cache)

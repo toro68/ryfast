@@ -31,6 +31,7 @@ from ryfast_app.processing import (
     detect_monthly_anomalies,
     extract_point_monthly_metrics,
     format_number,
+    overlapping_months,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,9 +74,21 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
 
         if comparison_mode == COMPARE_YEARS and len(year_cols) >= 2:
             prev_year = sorted(year_cols)[-2]
-            prev_total, _, _ = calculate_yearly_total_from_monthly_averages(df, int(prev_year))
+            # Like perioder: bare måneder der begge år har tall, ellers måles
+            # et delår mot et helår.
+            shared = overlapping_months(df, [str(prev_year), str(latest_year)])
+            df_shared = df[pd.to_numeric(df["Month"], errors="coerce").isin(shared)] if "Month" in df.columns else df
+            prev_total, _, _ = calculate_yearly_total_from_monthly_averages(df_shared, int(prev_year))
+            latest_shared_total, shared_months, _ = calculate_yearly_total_from_monthly_averages(df_shared, int(latest_year))
             if prev_total:
-                st.metric(f"Endring vs {prev_year}", f"{((total - prev_total) / prev_total * 100):+.1f}%")
+                st.metric(
+                    f"Endring vs {prev_year}",
+                    f"{((latest_shared_total - prev_total) / prev_total * 100):+.1f}%",
+                    help=(
+                        f"Sammenligner de {shared_months} månedene der både {prev_year} og "
+                        f"{latest_year} har data."
+                    ),
+                )
 
     melt_cols = [str(y) for y in years_for_totals if str(y) in totals_df.columns]
     if melt_cols:
@@ -91,7 +104,7 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             margin=dict(t=60, b=40),
         )
-        st.plotly_chart(fig_totals, use_container_width=True)
+        st.plotly_chart(fig_totals, width="stretch")
 
     if point == "Ryfast (sum tunneler)":
         with st.expander("🔎 Fordeling mellom tunneler (Ryfylketunnelen vs Hundvågtunnelen)"):
@@ -109,16 +122,16 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
             melted_groups = totals_by_group_df.melt(id_vars=["Month", "Month Name"], value_vars=list(point_ids_by_group.keys()), var_name="Tunnel", value_name="Passeringer")
             fig_stack = px.bar(melted_groups, x="Month Name", y="Passeringer", color="Tunnel", title=f"Samlet trafikk {breakdown_year} (stacked per tunnel)")
             fig_stack.update_yaxes(tickformat=",")
-            st.plotly_chart(fig_stack, use_container_width=True)
+            st.plotly_chart(fig_stack, width="stretch")
             st.caption("Dekning (%) er snitt av rapportert dekning på målepunktene per måned.")
-            st.dataframe(coverage_by_group_df.round(1), use_container_width=True, hide_index=True)
+            st.dataframe(coverage_by_group_df.round(1), width="stretch", hide_index=True)
 
     with st.expander("📋 Totaltabell"):
         formatted_totals = totals_df.copy()
         numeric_cols = formatted_totals.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             formatted_totals[col] = formatted_totals[col].map(format_number)
-        st.dataframe(formatted_totals, use_container_width=True, hide_index=True)
+        st.dataframe(formatted_totals, width="stretch", hide_index=True)
 
 
 def render_data_quality_tab(
@@ -181,11 +194,11 @@ def render_data_quality_tab(
                     )
                     .properties(height=320)
                 )
-                st.altair_chart(chart, use_container_width=True)
+                st.altair_chart(chart, width="stretch")
         except Exception as exc:
             logger.warning("Datakvalitet (uker): klarte ikke vise dekningsgraf: %s", exc)
 
-        st.dataframe(cov.copy(), use_container_width=True, hide_index=True)
+        st.dataframe(cov.copy(), width="stretch", hide_index=True)
         return
 
     years = year_list if comparison_mode == COMPARE_YEARS else [year]
@@ -236,10 +249,10 @@ def render_data_quality_tab(
             )
             .properties(height=min(420, 24 * max(1, len(cov_piv.columns))), title="Dekning per måned og målepunkt")
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
         with st.expander("📋 Dekningstabell"):
-            st.dataframe(cov_piv.round(1), use_container_width=True)
+            st.dataframe(cov_piv.round(1), width="stretch")
 
     # Group coverage (Ryfast breakdown)
     if point == "Ryfast (sum tunneler)":
@@ -269,7 +282,7 @@ def render_data_quality_tab(
                 )
                 .properties(height=320)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
 
     st.markdown("### Usikkerhet (indikativ)")
     st.caption(
@@ -284,7 +297,7 @@ def render_data_quality_tab(
         display = totals_ci[["month_name", "total", "total_lower", "total_upper", "coverage_pct"]].copy()
         display["coverage_pct"] = display["coverage_pct"].round(1)
         display.columns = ["Måned", "Totalt", "Nedre", "Øvre", "Dekning (%)"]
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.dataframe(display, width="stretch", hide_index=True)
 
     if df is not None and not df.empty:
         st.markdown("### Anomali-varsler (indikativ)")
@@ -298,6 +311,6 @@ def render_data_quality_tab(
             st.warning(f"Flagget {len(anomalies)} anomalier.")
             st.dataframe(
                 anomalies.assign(deviation_pct=anomalies["deviation_pct"].round(1)),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
