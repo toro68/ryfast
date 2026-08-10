@@ -354,6 +354,11 @@ BICYCLE_DATA_START_YEAR = 2018
 # Et år er 366 døgn = 4 sider; 6 gir margin uten å kunne løpe løpsk.
 BICYCLE_MAX_PAGES = 6
 
+# «Alle punkter» over flere år gir mange uavhengige kall (28 punkter × N år,
+# hvert år opp mot 4 sider). Høyere tak enn bil-batchen fordi kallene er små
+# og ventetiden dominerer.
+MAX_BICYCLE_WORKERS = 12
+
 BICYCLE_DAILY_QUERY_TEMPLATE = """
 query {{
   trafficData(trafficRegistrationPointId: "{point_id}") {{
