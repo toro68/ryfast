@@ -156,3 +156,14 @@ class TestCalculateSeasonalPatterns:
 
     def test_uten_month_kolonne(self):
         assert calculate_seasonal_patterns(pd.DataFrame({"x": [1]})) == {}
+
+    def test_delvis_aar_gir_nan_uten_runtimewarning(self, recwarn):
+        # Regresjon: en sesong som ennå ikke har inntruffet er helt NaN, og
+        # np.nanmean logget «Mean of empty slice» for hver av dem.
+        df = pd.DataFrame(
+            {"Month": list(range(1, 13)), "2026": pd.array([100] * 7 + [None] * 5, dtype="Int64")}
+        )
+        patterns = calculate_seasonal_patterns(df)
+        assert patterns["2026"]["vår_snitt"] == pytest.approx(100.0)
+        assert np.isnan(patterns["2026"]["høst_snitt"])
+        assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]

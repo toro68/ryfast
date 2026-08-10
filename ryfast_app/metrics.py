@@ -230,6 +230,20 @@ def calculate_growth_rates(df: pd.DataFrame) -> pd.DataFrame:
             growth_df[growth_col] = ((curr - prev_vals) / prev_vals * 100).round(1)
     return growth_df
 
+def _season_mean(values) -> float:
+    """Snitt over en sesong, NaN når ingen av månedene har tall.
+
+    np.nanmean over en helt tom sesong gir riktig svar (NaN), men logger
+    «Mean of empty slice». Det skjer for hver sesong som ennå ikke har
+    inntruffet i inneværende år, så advarselen fyller loggen uten å peke på
+    noe galt. Vi sjekker derfor selv framfor å undertrykke advarselen.
+    """
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0 or np.all(np.isnan(arr)):
+        return float("nan")
+    return float(np.nanmean(arr))
+
+
 def calculate_seasonal_patterns(df: pd.DataFrame) -> Dict:
     if "Month" not in df.columns:
         return {}
@@ -240,9 +254,9 @@ def calculate_seasonal_patterns(df: pd.DataFrame) -> Dict:
             yearly = pd.to_numeric(df[year], errors="coerce").to_numpy()
             if len(yearly) == 12 and not np.all(np.isnan(yearly)):
                 patterns[year] = {
-                    "vinter_snitt": np.nanmean([yearly[11], yearly[0], yearly[1]]),
-                    "vår_snitt": np.nanmean(yearly[2:5]),
-                    "sommer_snitt": np.nanmean(yearly[5:8]),
-                    "høst_snitt": np.nanmean(yearly[8:11]),
+                    "vinter_snitt": _season_mean([yearly[11], yearly[0], yearly[1]]),
+                    "vår_snitt": _season_mean(yearly[2:5]),
+                    "sommer_snitt": _season_mean(yearly[5:8]),
+                    "høst_snitt": _season_mean(yearly[8:11]),
                 }
     return patterns
