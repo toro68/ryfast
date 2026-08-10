@@ -31,6 +31,7 @@ from ryfast_app.processing import (
     detect_monthly_anomalies,
     extract_point_monthly_metrics,
     format_number,
+    overlapping_months,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,9 +74,21 @@ def render_totals_tab(df: pd.DataFrame, point: str, comparison_mode: str, year_l
 
         if comparison_mode == COMPARE_YEARS and len(year_cols) >= 2:
             prev_year = sorted(year_cols)[-2]
-            prev_total, _, _ = calculate_yearly_total_from_monthly_averages(df, int(prev_year))
+            # Like perioder: bare måneder der begge år har tall, ellers måles
+            # et delår mot et helår.
+            shared = overlapping_months(df, [str(prev_year), str(latest_year)])
+            df_shared = df[pd.to_numeric(df["Month"], errors="coerce").isin(shared)] if "Month" in df.columns else df
+            prev_total, _, _ = calculate_yearly_total_from_monthly_averages(df_shared, int(prev_year))
+            latest_shared_total, shared_months, _ = calculate_yearly_total_from_monthly_averages(df_shared, int(latest_year))
             if prev_total:
-                st.metric(f"Endring vs {prev_year}", f"{((total - prev_total) / prev_total * 100):+.1f}%")
+                st.metric(
+                    f"Endring vs {prev_year}",
+                    f"{((latest_shared_total - prev_total) / prev_total * 100):+.1f}%",
+                    help=(
+                        f"Sammenligner de {shared_months} månedene der både {prev_year} og "
+                        f"{latest_year} har data."
+                    ),
+                )
 
     melt_cols = [str(y) for y in years_for_totals if str(y) in totals_df.columns]
     if melt_cols:

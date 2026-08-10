@@ -163,29 +163,33 @@ def main():
         return TRAFFIC_POINTS["Bybrua"]["ids"][direction]
 
     if submitted:
+        # Valider før henting: uten gyldig utvalg skal vi ikke kalle API-et og
+        # ende opp med et generisk «ingen data»-varsel.
+        selection_ok = True
         if comparison_mode == COMPARE_YEARS:
             try:
                 year_list = [int(y.strip()) for y in year_input.split(",") if y.strip()]
             except ValueError:
                 st.sidebar.error("Ugyldig format. Bruk f.eks. 2024,2025")
-                st.session_state.last_result = None
                 year_list = []
             if not year_list:
                 st.sidebar.warning("Velg minst ett år")
-                st.session_state.last_result = None
+                selection_ok = False
             else:
                 year = year_list[-1]
-
-        if comparison_mode == COMPARE_MONTHS and not months:
+        elif comparison_mode == COMPARE_MONTHS and not months:
             st.sidebar.warning("Velg minst én måned")
-            st.session_state.last_result = None
-        if comparison_mode == COMPARE_WEEKS and not weeks:
+            selection_ok = False
+        elif comparison_mode == COMPARE_WEEKS and not weeks:
             st.sidebar.warning("Velg minst én uke")
+            selection_ok = False
+
+        if not selection_ok:
             st.session_state.last_result = None
 
         point_ids = resolve_point_ids()
 
-        if (comparison_mode == COMPARE_YEARS and year_list) or (comparison_mode != COMPARE_YEARS):
+        if selection_ok:
             with st.spinner("🔄 Behandler data..."):
                 if comparison_mode == COMPARE_YEARS:
                     result_tuple = process_data_for_years(point_ids, year_list, timeout_s, use_cache, estimate_missing_points)

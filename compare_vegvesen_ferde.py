@@ -122,7 +122,10 @@ def read_xlsx_sheet_rows(  # pylint: disable=too-many-locals,too-many-branches
     Minimal XLSX-leser (uten openpyxl): returnerer en liste av rader (liste av celler som str).
     Støtter sharedStrings og numeriske verdier for enkle ark.
     """
-    ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    ns = {
+        "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    }
     with zipfile.ZipFile(xlsx_path) as z:
         workbook = ET.fromstring(z.read("xl/workbook.xml"))
         sheets = workbook.findall(".//main:sheets/main:sheet", ns)
@@ -131,8 +134,25 @@ def read_xlsx_sheet_rows(  # pylint: disable=too-many-locals,too-many-branches
         if sheet_index >= len(sheets):
             raise ValueError(f"sheet_index={sheet_index} utenfor antall sheets={len(sheets)}")
 
-        sheet_id = sheets[sheet_index].attrib["sheetId"]
-        sheet_xml_path = f"xl/worksheets/sheet{sheet_id}.xml"
+        # sheetId sier ingenting om filnavnet; korrekt vei er r:id -> workbook.xml.rels.
+        rel_id = sheets[sheet_index].attrib.get(f"{{{ns['r']}}}id")
+        if not rel_id:
+            raise ValueError("Arket mangler r:id-referanse i workbook.xml")
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        target = next(
+            (
+                rel.attrib.get("Target", "")
+                for rel in rels
+                if rel.attrib.get("Id") == rel_id
+            ),
+            None,
+        )
+        if not target:
+            raise ValueError(f"Fant ingen relasjon for {rel_id} i workbook.xml.rels")
+        # Target er relativ til xl/ og kan være "worksheets/sheet1.xml" eller "/xl/...".
+        sheet_xml_path = target[1:] if target.startswith("/") else f"xl/{target.lstrip('./')}"
+        if sheet_xml_path not in z.namelist():
+            raise ValueError(f"Fant ikke arkfilen {sheet_xml_path} i {xlsx_path.name}")
 
         shared: List[str] = []
         if "xl/sharedStrings.xml" in z.namelist():

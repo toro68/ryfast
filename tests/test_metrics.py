@@ -1,5 +1,7 @@
 """Karakteriseringstester for dekningssammendrag, totaler, vekst og sesongmønstre."""
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -78,6 +80,22 @@ class TestComputeMonthlyCoverageSummary:
         assert len(out) == 12
         assert (out["points_present"] == 0).all()
         assert (out["points_expected"] == 1).all()
+
+    def test_avsluttet_aar_kan_vurderes_i_alle_maaneder(self):
+        out = compute_monthly_coverage_summary(two_point_year(), 2024, ["punkt_a", "punkt_b"])
+        assert out["is_assessable"].all()
+
+    def test_fremtidige_maaneder_kan_ikke_vurderes(self):
+        # Regresjon: måneder som ikke har inntruffet ble flagget som datahull
+        neste_aar = date.today().year + 1
+        out = compute_monthly_coverage_summary({}, neste_aar, ["punkt_a"])
+        assert not out["is_assessable"].any()
+
+    def test_innevaerende_aar_utelater_paagaaende_og_senere_maaneder(self):
+        i_dag = date.today()
+        out = compute_monthly_coverage_summary({}, i_dag.year, ["punkt_a"])
+        vurderbare = out[out["is_assessable"]]["month"].tolist()
+        assert vurderbare == list(range(1, i_dag.month))
 
 
 class TestCoveragePivot:

@@ -1,6 +1,7 @@
 """Radnivå-databehandling for trafikkdata (streamlit-fri)."""
 
 import calendar
+from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -10,12 +11,13 @@ from ryfast_app.config import ANOMALY_THRESHOLD_PCT, MONTH_NAMES, POINT_ID_LABEL
 
 
 def format_number(x):
+    """Norsk tallformat: mellomrom som tusenskiller, komma som desimaltegn."""
     if pd.isna(x):
         return "N/A"
     if isinstance(x, (int, float, np.integer, np.floating)):
         if float(x).is_integer():
             return f"{int(x):,}".replace(",", " ")
-        return f"{x:,.1f}".replace(",", " ")
+        return f"{x:,.1f}".replace(",", " ").replace(".", ",")
     if isinstance(x, str):
         try:
             return format_number(float(x))
@@ -25,6 +27,34 @@ def format_number(x):
 
 def days_in_year(year: int) -> int:
     return 366 if calendar.isleap(year) else 365
+
+def assessable_months(year: int, today: Optional[date] = None) -> List[int]:
+    """Måneder som er ferdige, og dermed kan vurderes for datadekning.
+
+    Inneværende måned utelates: den er per definisjon ufullstendig og ville
+    ellers flagges som et datahull. Fremtidige år gir ingen måneder.
+    """
+    today = today or date.today()
+    if year < today.year:
+        return list(range(1, 13))
+    if year > today.year:
+        return []
+    return list(range(1, today.month))
+
+def overlapping_months(df: pd.DataFrame, year_cols: List[str]) -> List[int]:
+    """Månedsnumre der samtlige oppgitte årskolonner har en tallverdi.
+
+    Brukes for å sammenligne like perioder: et delår skal ikke måles mot et helår.
+    """
+    if df is None or df.empty or "Month" not in df.columns:
+        return []
+    months = pd.to_numeric(df["Month"], errors="coerce")
+    mask = months.between(1, 12)
+    for col in year_cols:
+        if col not in df.columns:
+            return []
+        mask &= pd.to_numeric(df[col], errors="coerce").notna()
+    return [int(m) for m in months[mask].tolist()]
 
 def sum_traffic_data(
     traffic_data_dict: Dict[str, List[Dict]],
@@ -72,8 +102,13 @@ def detect_monthly_anomalies(df: pd.DataFrame, threshold_pct: float = ANOMALY_TH
     if len(years) < 2:
         return pd.DataFrame()
 
+    # Med kun to år er median-av-øvrige symmetrisk: hver måned ville flagges to
+    # ganger med motsatt fortegn. Da vurderer vi bare det seneste året mot det
+    # eldre. Med tre eller flere år er medianen et reelt forventningsnivå.
+    years_to_check = [max(years, key=int)] if len(years) == 2 else years
+
     rows: List[Dict[str, object]] = []
-    for year_col in years:
+    for year_col in years_to_check:
         other_cols = [c for c in years if c != year_col]
         for _, r in df.iterrows():
             month = int(r.get("Month", 0) or 0)

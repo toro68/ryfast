@@ -12,7 +12,7 @@
   - `workflows.py`: `process_data_for_years/months/weeks` (driver `st.progress`).
   - `exports/`: `excel.py` og `pdf.py` (rapportbyggere).
   - `ui/`: `banners.py`, `charts.py`, `comparisons.py`, `export_section.py`, `tabs.py`.
-- `streamlit_app.py`: entrypoint for Streamlit Cloud (2-linjers shim). `traffic_data_app.py` er et legacy-alias; `main.py` er deprecated.
+- `streamlit_app.py`: eneste entrypoint for Streamlit Cloud (2-linjers shim mot `ryfast_app.app.main`).
 - `compare_vegvesen_ferde.py`: CLI som sammenligner Vegvesen-tall med Ferde-data (leser Excel i `docs/`, skriver CSV). Bruker den delte klienten i `ryfast_app/vegvesen_api.py` og punkt-ID-ene i `ryfast_app/config.py`.
 - `scripts/debug_api.py`: feilsøking av API-tilkobling/responstid.
 - `tests/`: pytest-suite for ren databehandling, metrikker, API-klient og eksport.

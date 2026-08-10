@@ -87,7 +87,7 @@ def fetch_data(query: str, timeout_s: int, use_cache: bool) -> Optional[Dict]:
 
 
 def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, use_cache: bool) -> Dict[str, List[Dict]]:
-    if year < DATA_START_YEAR:
+    if year < DATA_START_YEAR or not point_ids:
         return {}
 
     fetch_fn = _fetch_data_cached if use_cache else _fetch_data_uncached

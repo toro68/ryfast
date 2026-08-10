@@ -28,11 +28,25 @@ def render_api_status_sidebar() -> None:
         st.dataframe(pd.DataFrame(errors).iloc[::-1], use_container_width=True, hide_index=True)
 
 
+def _assessable_only(coverage_df: pd.DataFrame) -> pd.DataFrame:
+    """Dropp perioder som ennå ikke er ferdige.
+
+    De har ingen data å mangle, og ville ellers gi falsk alarm om datahull
+    hver gang man ser på inneværende år.
+    """
+    if "is_assessable" not in coverage_df.columns:
+        return coverage_df.copy()
+    return coverage_df[coverage_df["is_assessable"].fillna(True).astype(bool)].copy()
+
+
 def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
     if coverage_df is None or coverage_df.empty:
         return
 
-    tmp = coverage_df.copy()
+    tmp = _assessable_only(coverage_df)
+    if tmp.empty:
+        return
+
     tmp["has_issue"] = False
     if "points_expected" in tmp.columns and "points_present" in tmp.columns:
         tmp["has_issue"] |= tmp["points_present"] < tmp["points_expected"]
@@ -69,7 +83,7 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
         data_cov_text += "N/A"
 
     if issues.empty:
-        st.success("✅ 100% i perioden som vises\n\n" + point_cov_text + "\n\n" + data_cov_text)
+        st.success("✅ 100% i de fullførte periodene som vises\n\n" + point_cov_text + "\n\n" + data_cov_text)
         return
 
     def _labels(sub: pd.DataFrame) -> List[str]:
@@ -86,12 +100,12 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
     else:
         where = ", ".join(_labels(issues))
 
-    st.warning("⚠️ Ikke 100% i perioden som vises\n\n" + point_cov_text + "\n\n" + data_cov_text + "\n\n" + f"**Perioder:** {where}")
+    st.warning("⚠️ Ikke 100% i de fullførte periodene som vises\n\n" + point_cov_text + "\n\n" + data_cov_text + "\n\n" + f"**Perioder:** {where}")
 
     with st.expander("🔎 Detaljer (dekning)", expanded=False):
         try:
-            if "month_name" in coverage_df.columns and "mean_coverage_pct" in coverage_df.columns:
-                plot_df = coverage_df.dropna(subset=["mean_coverage_pct"]).copy()
+            if "month_name" in tmp.columns and "mean_coverage_pct" in tmp.columns:
+                plot_df = tmp.dropna(subset=["mean_coverage_pct"]).copy()
                 if not plot_df.empty:
                     plot_df["month_name"] = pd.Categorical(plot_df["month_name"], categories=MONTH_NAMES, ordered=True)
                     color = alt.Color("year:N", title="År") if "year" in plot_df.columns and plot_df["year"].nunique() > 1 else alt.value("#1f77b4")
@@ -113,8 +127,8 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
                         .properties(height=220)
                     )
                     st.altair_chart(chart, use_container_width=True)
-            elif "week" in coverage_df.columns and "mean_coverage_pct" in coverage_df.columns:
-                plot_df = coverage_df.dropna(subset=["mean_coverage_pct"]).copy()
+            elif "week" in tmp.columns and "mean_coverage_pct" in tmp.columns:
+                plot_df = tmp.dropna(subset=["mean_coverage_pct"]).copy()
                 if not plot_df.empty:
                     week_order = sorted(plot_df["week"].astype(str).unique(), key=lambda s: int("".join([c for c in s if c.isdigit()]) or "0"))
                     chart = (
@@ -135,14 +149,14 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
             logger.warning("Dekning: klarte ikke vise detalj-graf: %s", exc)
 
         cols: List[str] = []
-        if "year" in coverage_df.columns:
+        if "year" in tmp.columns:
             cols.append("year")
-        if "month_name" in coverage_df.columns:
+        if "month_name" in tmp.columns:
             cols.append("month_name")
-        if "week" in coverage_df.columns:
+        if "week" in tmp.columns:
             cols.append("week")
-        cols += [c for c in ["points_present", "points_expected", "mean_coverage_pct", "min_coverage_pct"] if c in coverage_df.columns]
-        view = coverage_df[cols].copy()
+        cols += [c for c in ["points_present", "points_expected", "mean_coverage_pct", "min_coverage_pct"] if c in tmp.columns]
+        view = tmp[cols].copy()
         for c in ["mean_coverage_pct", "min_coverage_pct", "points_present_pct"]:
             if c in view.columns:
                 view[c] = pd.to_numeric(view[c], errors="coerce").round(1)
@@ -162,6 +176,9 @@ def render_point_basis_note(coverage_df: pd.DataFrame) -> None:
     if coverage_df is None or coverage_df.empty:
         return
     if not {"points_present", "points_expected"} <= set(coverage_df.columns):
+        return
+    coverage_df = _assessable_only(coverage_df)
+    if coverage_df.empty:
         return
     expected = int(coverage_df["points_expected"].dropna().iloc[0]) if coverage_df["points_expected"].notna().any() else 0
     if not expected:

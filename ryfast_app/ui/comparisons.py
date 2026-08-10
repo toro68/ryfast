@@ -7,7 +7,11 @@ import plotly.express as px
 import streamlit as st
 
 from ryfast_app.metrics import calculate_growth_rates
-from ryfast_app.processing import calculate_yearly_total_from_monthly_averages, format_number
+from ryfast_app.processing import (
+    calculate_yearly_total_from_monthly_averages,
+    format_number,
+    overlapping_months,
+)
 from ryfast_app.ui.charts import (
     _pairwise_period_comparison,
     _period_label_column,
@@ -40,8 +44,12 @@ def _render_pairwise_year_comparison(df: pd.DataFrame) -> None:
         st.info("Fant ingen perioder med sammenlignbare verdier for de valgte årene.")
         return
 
-    total_baseline, _, _ = calculate_yearly_total_from_monthly_averages(df, int(baseline_year))
-    total_compare, compare_months, _ = calculate_yearly_total_from_monthly_averages(df, int(compare_year))
+    # Sammenlign bare måneder der begge år har tall. Ellers måles et delår mot
+    # et helår, og et år med vekst framstår som kraftig nedgang.
+    shared_months = overlapping_months(df, [baseline_year, compare_year])
+    df_shared = df[pd.to_numeric(df["Month"], errors="coerce").isin(shared_months)] if "Month" in df.columns else df
+    total_baseline, _, _ = calculate_yearly_total_from_monthly_averages(df_shared, int(baseline_year))
+    total_compare, compare_months, _ = calculate_yearly_total_from_monthly_averages(df_shared, int(compare_year))
     total_delta = total_compare - total_baseline
     total_delta_pct = (total_delta / total_baseline * 100.0) if total_baseline else np.nan
     best_row = compare_df.loc[compare_df["Endring"].idxmax()]
@@ -51,9 +59,8 @@ def _render_pairwise_year_comparison(df: pd.DataFrame) -> None:
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        suffix = "hittil" if compare_months < 12 else "helår"
         st.metric(
-            f"Totalt {compare_year} ({suffix})",
+            f"Totalt {compare_year} ({compare_months} mnd)",
             format_number(total_compare),
             None if pd.isna(total_delta_pct) else f"{total_delta_pct:+.1f}% vs {baseline_year}",
         )
@@ -64,6 +71,11 @@ def _render_pairwise_year_comparison(df: pd.DataFrame) -> None:
     with m4:
         st.metric(f"Svakeste {period_label.lower()}", str(worst_row[label_col]), f"{float(worst_row['Endring']):+,.0f}".replace(",", " "))
 
+    if compare_months and compare_months < 12:
+        st.caption(
+            f"⚖️ Sammenligningen bruker de {compare_months} månedene der begge år har data, "
+            "slik at like perioder måles mot hverandre."
+        )
     st.caption(
         "Kortene over viser totaltrafikk beregnet fra måneds-ÅDT. Grafen under viser periodevis endring i ÅDT mellom årene."
     )
