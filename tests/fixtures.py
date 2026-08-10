@@ -23,6 +23,27 @@ def month_entry(
     }
 
 
+def bicycle_day(day: str, volume: Optional[float], coverage: Optional[float] = 100.0) -> Dict:
+    """Én kant i byDay-listen for et sykkelpunkt."""
+    return {
+        "node": {
+            "from": f"{day}T00:00:00+02:00",
+            "total": {
+                "volumeNumbers": {"volume": volume},
+                "coverage": {"percentage": coverage},
+            },
+        }
+    }
+
+
+def bicycle_payload(days: List[Dict], page_info: Optional[Dict] = None) -> Dict:
+    """byDay-svar for ett sykkelpunkt, valgfritt med pageInfo."""
+    by_day: Dict = {"edges": days}
+    if page_info is not None:
+        by_day["pageInfo"] = page_info
+    return {"data": {"trafficData": {"volume": {"byDay": by_day}}}}
+
+
 def two_point_year(year_scale: float = 1.0) -> Dict[str, List[Dict]]:
     """To målepunkter med data for januar og februar."""
     return {

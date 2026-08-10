@@ -25,6 +25,7 @@ from ryfast_app.ui.banners import (
     render_data_coverage_banner,
     render_point_basis_note,
 )
+from ryfast_app.ui.bicycle_tab import render_bicycle_tab
 from ryfast_app.ui.comparisons import create_comparison_dashboard
 from ryfast_app.ui.export_section import create_export_section
 from ryfast_app.ui.tabs import render_data_quality_tab, render_totals_tab
@@ -45,6 +46,8 @@ def init_session_state():
         st.session_state.last_result = None
     if "api_errors" not in st.session_state:
         st.session_state.api_errors = []
+    if "bicycle_result" not in st.session_state:
+        st.session_state.bicycle_result = None
 
 
 def main():
@@ -147,6 +150,7 @@ def main():
     if st.sidebar.button("🗑️ Tøm cache"):
         st.cache_data.clear()
         st.session_state.last_result = None
+        st.session_state.bicycle_result = None
         st.sidebar.success("Cache tømt!")
 
     def resolve_point_ids() -> List[str]:
@@ -229,8 +233,19 @@ def main():
                     "estimate_missing_points": bool(estimate_missing_points),
                 }
 
+    tabs = st.tabs(
+        ["📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport", "🚲 Sykkel"]
+    )
+    tab1, tab2, tab3, tab4, tab5, tab6 = tabs
+
+    # Sykkelfanen har eget punkt- og årsvalg, så den ligger utenfor sjekken på
+    # fullført bilanalyse: den skal virke også før «Analyser data» er trykket.
+    with tab6:
+        render_bicycle_tab()
+
     if not st.session_state.last_result:
-        st.info("Velg målepunkt og analysetype i sidebaren, og trykk «Analyser data».")
+        with tab1:
+            st.info("Velg målepunkt og analysetype i sidebaren, og trykk «Analyser data».")
         return
 
     result = st.session_state.last_result
@@ -245,8 +260,6 @@ def main():
     timeout_s = result["timeout_s"]
     use_cache = result["use_cache"]
     coverage_threshold = result.get("coverage_threshold", 90)
-
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport"])
 
     with tab1:
         st.subheader(title)

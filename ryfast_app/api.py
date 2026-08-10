@@ -2,7 +2,7 @@
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
@@ -12,13 +12,17 @@ from ryfast_app.config import (
     API_CACHE_TTL,
     API_ERROR_BUFFER_MAX,
     API_ERROR_SESSION_MAX,
+    BICYCLE_DAILY_QUERY_TEMPLATE,
+    BICYCLE_DATA_START_YEAR,
+    BICYCLE_MAX_PAGES,
     DATA_START_YEAR,
     MAX_BATCH_WORKERS,
     MAX_WEEKLY_WORKERS,
     QUERY_TEMPLATE,
     WEEKLY_QUERY_TEMPLATE,
 )
-from ryfast_app.vegvesen_api import VegvesenApiError, iso_week_date_range, post_graphql
+from ryfast_app.bicycle import year_to_date_range
+from ryfast_app.vegvesen_api import OSLO_TZ, VegvesenApiError, iso_week_date_range, post_graphql
 
 logger = logging.getLogger(__name__)
 
@@ -170,3 +174,98 @@ def fetch_weekly_traffic_data(
                 wn, pid = futures[future]
                 logger.error("Feil ved henting av ukesdata for uke %s, punkt %s: %s", wn, pid, str(e))
     return result, cov_result
+
+
+def _bicycle_by_day(payload: Optional[Dict]) -> Dict:
+    """Plukk ut byDay-noden, eller en tom node hvis svaret mangler den."""
+    return (
+        ((payload or {}).get("data") or {}).get("trafficData", {}).get("volume", {}).get("byDay")
+    ) or {}
+
+
+def fetch_bicycle_daily_data(
+    point_id: str,
+    from_date: str,
+    to_date: str,
+    timeout_s: int,
+    use_cache: bool,
+    max_pages: int = BICYCLE_MAX_PAGES,
+) -> Optional[Dict]:
+    """Hent døgnvolum for ett sykkelpunkt i et datointervall.
+
+    byDay gir maks 100 døgn per side, så et år må hentes over flere sider.
+    Sidene slås sammen til én payload med samme struktur som et enkeltsvar,
+    slik at `ryfast_app.bicycle.parse_daily_volumes` ikke trenger å kjenne
+    pagineringen. Returnerer None ved feil på første side.
+
+    Ett punkt per kall: sykkelvisningen viser ett punkt om gangen, så det er
+    ikke noe å parallellisere på punktnivå. Sidene må hentes i rekkefølge
+    fordi hver markør kommer fra forrige svar.
+    """
+    if not point_id:
+        return None
+
+    edges: List[Dict] = []
+    after: Optional[str] = None
+    for _ in range(max_pages):
+        after_arg = f', after: "{after}"' if after else ""
+        query = BICYCLE_DAILY_QUERY_TEMPLATE.format(
+            point_id=point_id, from_date=from_date, to_date=to_date, after_arg=after_arg
+        )
+        payload = fetch_data(query, timeout_s, use_cache)
+        by_day = _bicycle_by_day(payload)
+        page_edges = by_day.get("edges") or []
+        edges.extend(page_edges)
+
+        if payload is None:
+            if not edges:
+                # Første side feilet: skill mellom feil og et punkt uten data.
+                return None
+            # Senere side feilet: behold det vi har, men ikke la det passere
+            # stille — grafen vil se avkortet ut uten at noe er galt med punktet.
+            logger.warning(
+                "Sykkeldata for punkt %s: en side feilet etter %s døgn; viser delvis serie.",
+                point_id,
+                len(edges),
+            )
+            break
+
+        page_info = by_day.get("pageInfo") or {}
+        next_cursor = page_info.get("endCursor")
+        # Uten ny markør ville neste runde hentet samme side om igjen.
+        if not page_info.get("hasNextPage") or not next_cursor or next_cursor == after:
+            break
+        after = next_cursor
+    else:
+        logger.warning(
+            "Sykkeldata for punkt %s nådde sidegrensen (%s sider); resten er utelatt.",
+            point_id,
+            max_pages,
+        )
+
+    return {"data": {"trafficData": {"volume": {"byDay": {"edges": edges}}}}}
+
+
+def fetch_bicycle_year(
+    point_id: str,
+    year: int,
+    timeout_s: int,
+    use_cache: bool,
+    today: Optional[date] = None,
+) -> Optional[Dict]:
+    """Hent ett år med døgndata, avkortet mot dagens dato.
+
+    Tidsstemplene bruker Europe/Oslo via ZoneInfo framfor en fast offset:
+    med hardkodet +01:00 forskyves døgngrensen en time gjennom sommertiden,
+    og siste døgn faller på feil side av det eksklusive `to`.
+    """
+    if year < BICYCLE_DATA_START_YEAR:
+        return None
+    span = year_to_date_range(year, today=today)
+    if span is None:
+        return None
+    start, end = span
+    from_str = datetime.combine(start, time(0, 0), tzinfo=OSLO_TZ).isoformat()
+    # `to` er eksklusiv i byDay, så vi ber om midnatt dagen etter sluttdatoen.
+    to_str = datetime.combine(end + timedelta(days=1), time(0, 0), tzinfo=OSLO_TZ).isoformat()
+    return fetch_bicycle_daily_data(point_id, from_str, to_str, timeout_s, use_cache)
