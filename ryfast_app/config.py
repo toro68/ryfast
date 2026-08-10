@@ -136,3 +136,248 @@ POINT_ID_LABELS: Dict[str, str] = {
     "17949V320695": "Bybrua (Mot nord)",
     "54184V320694": "Bybrua (Mot sør)",
 }
+
+# --- Sykkelregistrering, Nord-Jæren -------------------------------------------
+# Punktene er hentet fra API-ets eget register (trafficRegistrationPoints med
+# trafficRegistrationType=BICYCLE, fylke Rogaland) framfor å tastes inn manuelt:
+# ID-er kan ikke gjettes fra vegreferanse, og en feil ID gir tomt svar uten feil.
+# `operational=False` betyr at punktet er nedlagt (OUT_OF_SERVICE). Slike punkter
+# har fortsatt historikk, men gir ingen tall for inneværende år.
+BICYCLE_POINTS: Dict[str, Dict[str, object]] = {
+    "21421B1828936": {
+        "name": "Opstadvegen sykkel",
+        "municipality": "Hå",
+        "lat": 58.650771,
+        "lon": 5.668631,
+        "operational": True,
+    },
+    "28662B2604257": {
+        "name": "Anda sykkel-begge retn.",
+        "municipality": "Klepp",
+        "lat": 58.775604,
+        "lon": 5.642737,
+        "operational": True,
+    },
+    "14779B1769080": {
+        "name": "Kåsen sykkel- begge retn",
+        "municipality": "Klepp",
+        "lat": 58.746749,
+        "lon": 5.632532,
+        "operational": True,
+    },
+    "24783B2045151": {
+        "name": "Orstad sykkel- begge retn.",
+        "municipality": "Klepp",
+        "lat": 58.798377,
+        "lon": 5.72743,
+        "operational": True,
+    },
+    "72727B282558": {
+        "name": "Bråstein (sykkel)",
+        "municipality": "Sandnes",
+        "lat": 58.808369,
+        "lon": 5.776337,
+        "operational": True,
+    },
+    "29949B2713572": {
+        "name": "Bærheim sykkel",
+        "municipality": "Sandnes",
+        "lat": 58.88326,
+        "lon": 5.689183,
+        "operational": True,
+    },
+    "46587B1727498": {
+        "name": "Folkvord bru sykkel",
+        "municipality": "Sandnes",
+        "lat": 58.85098,
+        "lon": 5.703123,
+        "operational": True,
+    },
+    "59155B1685723": {
+        "name": "Hogstad (sykkel)",
+        "municipality": "Sandnes",
+        "lat": 58.878372,
+        "lon": 5.828406,
+        "operational": True,
+    },
+    "89794B320138": {
+        "name": "Hoveveien sykkel",
+        "municipality": "Sandnes",
+        "lat": 58.835729,
+        "lon": 5.731553,
+        "operational": True,
+    },
+    "51884B1868825": {
+        "name": "Lura sykkel",
+        "municipality": "Sandnes",
+        "lat": 58.873749,
+        "lon": 5.73371,
+        "operational": False,
+    },
+    "43749B319868": {
+        "name": "Soma skole (sykkel)",
+        "municipality": "Sandnes",
+        "lat": 58.86253,
+        "lon": 5.701971,
+        "operational": True,
+    },
+    "16851B2120991": {
+        "name": "Somaveien sykkel",
+        "municipality": "Sandnes",
+        "lat": 58.872808,
+        "lon": 5.724817,
+        "operational": False,
+    },
+    "44930B2721303": {
+        "name": "Flyplassvegen Sola Sykkel",
+        "municipality": "Sola",
+        "lat": 58.892621,
+        "lon": 5.63084,
+        "operational": True,
+    },
+    "13634B2721359": {
+        "name": "Sømmevågen 2 Sykkel",
+        "municipality": "Sola",
+        "lat": 58.895981,
+        "lon": 5.639604,
+        "operational": True,
+    },
+    "08947B320223": {
+        "name": "Bjergsted sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.976726,
+        "lon": 5.717356,
+        "operational": False,
+    },
+    "01277B2094427": {
+        "name": "Bybrua vest",
+        "municipality": "Stavanger",
+        "lat": 58.969186,
+        "lon": 5.747731,
+        "operational": True,
+    },
+    "01255B2094425": {
+        "name": "Bybrua øst",
+        "municipality": "Stavanger",
+        "lat": 58.969309,
+        "lon": 5.748117,
+        "operational": True,
+    },
+    "75339B2422185": {
+        "name": "Hillevåg sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.938904,
+        "lon": 5.744329,
+        "operational": True,
+    },
+    "82609B1883476": {
+        "name": "Kannik (sykkel)",
+        "municipality": "Stavanger",
+        "lat": 58.965675,
+        "lon": 5.730462,
+        "operational": True,
+    },
+    "75801B1859618": {
+        "name": "Lassa sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.959777,
+        "lon": 5.699419,
+        "operational": True,
+    },
+    "10887B320297": {
+        "name": "Randabergveien sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.975604,
+        "lon": 5.710285,
+        "operational": True,
+    },
+    "48028B1735081": {
+        "name": "Revheimsvegen sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.95164,
+        "lon": 5.658076,
+        "operational": True,
+    },
+    "73691B1835999": {
+        "name": "Siddishallen Sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.954643,
+        "lon": 5.69501,
+        "operational": True,
+    },
+    "04662B2863139": {
+        "name": "Svartholen Sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.912765,
+        "lon": 5.684435,
+        "operational": True,
+    },
+    "99274B3204701": {
+        "name": "Sykkelstamvegen Forus nord",
+        "municipality": "Stavanger",
+        "lat": 58.890873,
+        "lon": 5.714687,
+        "operational": True,
+    },
+    "34304B3204701": {
+        "name": "Sykkelstamvegen: Asser jåtten bru sør",
+        "municipality": "Stavanger",
+        "lat": 58.917125,
+        "lon": 5.697605,
+        "operational": True,
+    },
+    "35879B3204687": {
+        "name": "Sykkelstamvegen:Asser jåtten bru sykkel vest",
+        "municipality": "Stavanger",
+        "lat": 58.917865,
+        "lon": 5.698334,
+        "operational": True,
+    },
+    "70394B2415370": {
+        "name": "Vassbotnen sykkel",
+        "municipality": "Stavanger",
+        "lat": 58.890831,
+        "lon": 5.713739,
+        "operational": True,
+    },
+}
+
+# Sykkeltellinger er små tall med kraftig ukesrytme, så døgnoppløsning er
+# hovedvisningen. Terskelen brukes til å gråne ut dager med for lav dekning.
+BICYCLE_MIN_COVERAGE_PCT = 50.0
+
+# Første år med sykkeldata av brukbar kvalitet i registeret.
+BICYCLE_DATA_START_YEAR = 2018
+
+# byDay returnerer maks 100 døgn per side. Et helt år krever derfor
+# paginering via pageInfo/after — uten den stopper grafen stille i april.
+# Et år er 366 døgn = 4 sider; 6 gir margin uten å kunne løpe løpsk.
+BICYCLE_MAX_PAGES = 6
+
+BICYCLE_DAILY_QUERY_TEMPLATE = """
+query {{
+  trafficData(trafficRegistrationPointId: "{point_id}") {{
+    volume {{
+      byDay(from: "{from_date}", to: "{to_date}"{after_arg}) {{
+        pageInfo {{
+          hasNextPage
+          endCursor
+        }}
+        edges {{
+          node {{
+            from
+            total {{
+              volumeNumbers {{
+                volume
+              }}
+              coverage {{
+                percentage
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"""

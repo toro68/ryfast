@@ -9,9 +9,10 @@
   - `api.py`: streamlit-laget (cache, trådsikker feilbuffer, parallell batch-/ukeshenting).
   - `processing.py`: radnivå-databehandling (summer, anomalier, punktmetrikker) — ren pandas, testbar.
   - `metrics.py`: dekningssammendrag, totaler, vekst, sesongmønstre — ren pandas, testbar.
+  - `bicycle.py`: sykkeldata på døgnnivå (parsing, ukes-/sesongprofil, dekning) — ren pandas, testbar.
   - `workflows.py`: `process_data_for_years/months/weeks` (driver `st.progress`).
   - `exports/`: `excel.py` og `pdf.py` (rapportbyggere).
-  - `ui/`: `banners.py`, `charts.py`, `comparisons.py`, `export_section.py`, `tabs.py`.
+  - `ui/`: `banners.py`, `charts.py`, `comparisons.py`, `export_section.py`, `tabs.py`, `bicycle_tab.py`.
 - `streamlit_app.py` og `traffic_data_app.py`: entrypoints (shim mot `ryfast_app.app.main`). Den deployede appen har `traffic_data_app.py` som hovedmodul, satt i Streamlit Cloud-dashbordet — ikke i repoet. Ingen av filene kan slettes uten at dashbordet endres først, ellers stopper appen med «Main module does not exist».
 - `compare_vegvesen_ferde.py`: CLI som sammenligner Vegvesen-tall med Ferde-data (leser Excel i `docs/`, skriver CSV). Bruker den delte klienten i `ryfast_app/vegvesen_api.py` og punkt-ID-ene i `ryfast_app/config.py`.
 - `scripts/debug_api.py`: feilsøking av API-tilkobling/responstid.
