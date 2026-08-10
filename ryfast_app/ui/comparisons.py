@@ -107,7 +107,7 @@ def _render_pairwise_year_comparison(df: pd.DataFrame) -> None:
         margin=dict(t=60, b=40),
     )
     fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.6)
-    st.plotly_chart(fig, use_container_width=True, key="pairwise_year_delta")
+    st.plotly_chart(fig, width="stretch", key="pairwise_year_delta")
 
 
 def _render_single_year_month_comparison(df: pd.DataFrame) -> None:
@@ -149,7 +149,7 @@ def _render_single_year_month_comparison(df: pd.DataFrame) -> None:
     )
     fig.update_traces(hovertemplate="%{y}: <b>%{x:,.0f}</b> ÅDT<extra></extra>")
     fig.update_layout(template="plotly_white", height=420, xaxis=dict(tickformat=","), margin=dict(t=60, b=40))
-    st.plotly_chart(fig, use_container_width=True, key="month_ranking")
+    st.plotly_chart(fig, width="stretch", key="month_ranking")
 
 
 def _render_weekly_change_summary(df: pd.DataFrame) -> None:
@@ -206,7 +206,7 @@ def _render_weekly_change_summary(df: pd.DataFrame) -> None:
     )
     fig.update_layout(template="plotly_white", height=360, yaxis=dict(tickformat=","), margin=dict(t=60, b=40))
     fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.6)
-    st.plotly_chart(fig, use_container_width=True, key="weekly_delta")
+    st.plotly_chart(fig, width="stretch", key="weekly_delta")
 
 
 def create_comparison_dashboard(df: pd.DataFrame, point: str):
@@ -264,12 +264,12 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
             yaxis=dict(tickformat=","),
             margin=dict(t=60, b=40),
         )
-        st.plotly_chart(fig, use_container_width=True, key="weekly_bar", config={"displayModeBar": True})
+        st.plotly_chart(fig, width="stretch", key="weekly_bar", config={"displayModeBar": True})
     else:
         fig = create_advanced_visualization(df, point, chart_type)
         st.plotly_chart(
             fig,
-            use_container_width=True,
+            width="stretch",
             key=f"main_chart_{chart_type}",
             config={"displayModeBar": True, "responsive": True},
         )
@@ -339,4 +339,4 @@ def create_comparison_dashboard(df: pd.DataFrame, point: str):
                         ),
                     )
                 )
-                st.altair_chart((bars + zero + text).properties(title="År-til-år vekstrater"), use_container_width=True)
+                st.altair_chart((bars + zero + text).properties(title="År-til-år vekstrater"), width="stretch")

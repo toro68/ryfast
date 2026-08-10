@@ -261,14 +261,14 @@ def main():
         numeric_cols = formatted_df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             formatted_df[col] = formatted_df[col].map(format_number)
-        st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+        st.dataframe(formatted_df, width="stretch", hide_index=True)
         if coverage_summary is not None and not coverage_summary.empty:
             with st.expander("🛡️ Datadekning (for perioden som vises)"):
                 cov_view = coverage_summary.copy()
                 for c in ["points_present_pct", "mean_coverage_pct", "min_coverage_pct"]:
                     if c in cov_view.columns:
                         cov_view[c] = pd.to_numeric(cov_view[c], errors="coerce").round(1)
-                st.dataframe(cov_view, use_container_width=True, hide_index=True)
+                st.dataframe(cov_view, width="stretch", hide_index=True)
 
     with tab3:
         render_totals_tab(df, point, comparison_mode, year_list, year, point_ids, timeout_s, use_cache)

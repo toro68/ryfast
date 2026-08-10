@@ -25,7 +25,7 @@ def render_api_status_sidebar() -> None:
         if st.button("Tøm API-feil", type="secondary"):
             clear_api_errors()
             st.rerun()
-        st.dataframe(pd.DataFrame(errors).iloc[::-1], use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(errors).iloc[::-1], width="stretch", hide_index=True)
 
 
 def _assessable_only(coverage_df: pd.DataFrame) -> pd.DataFrame:
@@ -126,7 +126,7 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
                         )
                         .properties(height=220)
                     )
-                    st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, width="stretch")
             elif "week" in tmp.columns and "mean_coverage_pct" in tmp.columns:
                 plot_df = tmp.dropna(subset=["mean_coverage_pct"]).copy()
                 if not plot_df.empty:
@@ -144,7 +144,7 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
                         )
                         .properties(height=220)
                     )
-                    st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, width="stretch")
         except Exception as exc:
             logger.warning("Dekning: klarte ikke vise detalj-graf: %s", exc)
 
@@ -160,7 +160,7 @@ def render_data_coverage_banner(coverage_df: pd.DataFrame) -> None:
         for c in ["mean_coverage_pct", "min_coverage_pct", "points_present_pct"]:
             if c in view.columns:
                 view[c] = pd.to_numeric(view[c], errors="coerce").round(1)
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
 
 
 def render_anomaly_banner(df: pd.DataFrame) -> None:

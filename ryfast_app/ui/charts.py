@@ -148,19 +148,19 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
     years = _year_columns(df)
     if not years:
         st.warning("Fant ingen årskolonner i datasettet. Viser linjediagram.")
-        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_no_years")
+        st.plotly_chart(create_advanced_visualization(df, point, "line"), width="stretch", key="fallback_line_no_years")
         return
 
     long_df = _long_year_df(df)
     if long_df.empty:
         st.warning("Fant ingen plottbare data. Viser linjediagram.")
-        st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_empty")
+        st.plotly_chart(create_advanced_visualization(df, point, "line"), width="stretch", key="fallback_line_empty")
         return
 
     if chart_type == "heatmap":
         if "Month Name" not in long_df.columns or len(years) < 2:
             st.info("Varmekart krever minst 2 år og månedsdata.")
-            st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_no_heatmap")
+            st.plotly_chart(create_advanced_visualization(df, point, "line"), width="stretch", key="fallback_line_no_heatmap")
             return
 
         month_sort = MONTH_NAMES
@@ -193,7 +193,7 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
             )
         )
         chart = (rect + text).properties(title=f"Sesongmønster for {point}", height=420)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
         return
 
     if chart_type == "box":
@@ -208,7 +208,7 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
             )
             .properties(title=f"Trafikkfordeling for {point}", height=420)
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
         return
 
     if chart_type == "line_with_confidence":
@@ -234,10 +234,10 @@ def _render_altair_chart(df: pd.DataFrame, point: str, chart_type: str):
             )
             .properties(title=f"Trafikkutvikling for {point}", height=460)
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
         return
 
-    st.plotly_chart(create_advanced_visualization(df, point, "line"), use_container_width=True, key="fallback_line_default")
+    st.plotly_chart(create_advanced_visualization(df, point, "line"), width="stretch", key="fallback_line_default")
 
 
 def _year_columns(df: pd.DataFrame) -> List[str]:
