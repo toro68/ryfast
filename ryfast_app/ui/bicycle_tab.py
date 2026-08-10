@@ -1,8 +1,18 @@
-"""Sykkelfane: døgnvolum for ett registreringspunkt på Nord-Jæren.
+"""Sykkelfane: døgnvolum for sykkelregistreringspunkter på Nord-Jæren.
 
-Fanen har eget punktvalg og henter data på klikk, uavhengig av bilanalysen i
-de andre fanene. Døgn er hovedvisningen fordi sykling er værstyrt og har
-markert ukesrytme; et månedssnitt skjuler nettopp det som er interessant.
+Fanen har egne innstillinger i sidebaren (punkter, år, aggregering) og henter
+data på klikk, uavhengig av bilanalysen i de andre fanene.
+
+Døgn er hovedvisningen fordi sykling er værstyrt og har markert ukesrytme; et
+månedssnitt skjuler nettopp det som er interessant.
+
+To fallgruver som styrer visningen, begge synlige i ekte data:
+- Summerer man flere punkter, faller summen når ett punkt mangler data. Det
+  ser ut som nedgang i sykling. Derfor krever et pålitelig døgn at alle valgte
+  punkter har tall, og `points_present` gjør grunnlaget synlig.
+- Dekningen varierer mellom år. Et år kan ha mistet hele vinteren, og siden
+  sommertrafikken er 3-4x vintertrafikken, ville et årssnitt sammenlignet
+  sommer mot helår. Årssammenligningen bruker derfor bare felles måneder.
 """
 
 import logging
@@ -14,15 +24,23 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from ryfast_app.api import fetch_bicycle_year
+from ryfast_app.api import fetch_bicycle_points_years
 from ryfast_app.bicycle import (
     WEEKDAY_NAMES,
     bicycle_point_options,
+    comparable_months,
+    compare_years_monthly,
     coverage_summary,
+    mean_points_daily,
     monthly_profile,
+    panel_point_ids,
     parse_daily_volumes,
+    restrict_to_common_period,
+    restrict_to_comparable_months,
+    sum_points_daily,
     weekday_profile,
     weekend_vs_weekday,
+    year_comparison_summary,
 )
 from ryfast_app.config import (
     BICYCLE_DATA_START_YEAR,
@@ -34,7 +52,15 @@ from ryfast_app.processing import format_number
 
 logger = logging.getLogger(__name__)
 
-SEASON_ORDER = ["Vinter", "Vår", "Sommer", "Høst"]
+# Utvalgsmåter for punkter
+SCOPE_SELECTED = "Valgte punkter"
+SCOPE_ALL_OPERATIONAL = "Alle punkter i drift"
+SCOPE_ALL = "Alle punkter"
+SCOPE_MUNICIPALITY = "Alle i én kommune"
+
+# Hvordan flere punkter slås sammen
+AGG_SUM = "Sum (samlet antall)"
+AGG_MEAN = "Snitt per punkt"
 
 
 def _available_years(today: Optional[date] = None) -> List[int]:
@@ -198,90 +224,443 @@ def _render_metrics(daily: pd.DataFrame) -> None:
         )
 
 
-def _render_map(point_id: str) -> None:
-    meta = BICYCLE_POINTS.get(point_id)
-    if not meta:
+def _render_year_comparison(frames: Dict[int, pd.DataFrame]) -> None:
+    """Sammenlign år på lik periode og like måneder.
+
+    To korreksjoner, som begge er nødvendige for at prosenttallet skal bety
+    noe: inneværende år er avkortet mot dagens dato, og dekningen varierer
+    mellom år slik at et år kan mangle hele vinteren.
+    """
+    common = restrict_to_common_period(frames)
+    if len(common) < 2:
+        st.info("Velg minst to år med data for å sammenligne.")
         return
-    st.map(
-        pd.DataFrame({"lat": [float(meta["lat"])], "lon": [float(meta["lon"])]}),
-        zoom=12,
-        size=60,
+
+    cutoff_note = ""
+    any_frame = next((f for f in common.values() if not f.empty), None)
+    if any_frame is not None:
+        siste = pd.to_datetime(any_frame["date"]).max()
+        # Bare verdt å nevne når vi faktisk har kuttet noe.
+        if (siste.month, siste.day) != (12, 31):
+            cutoff_note = f" Alle år er kuttet ved {siste:%d.%m} for å måle like perioder."
+
+    # Sykkeltrafikken er 3-4x høyere om sommeren, så måneder som mangler i ett
+    # år ville alene gitt en «endring». Sammenlign derfor bare felles måneder.
+    months = comparable_months(common)
+    comparable = restrict_to_comparable_months(common)
+    if len(comparable) < 2 or not months:
+        st.warning(
+            "⚠️ Årene har ingen måneder med god dekning til felles, så et "
+            "prosenttall ville sammenlignet ulike deler av året. Se månedsgrafen "
+            "under for det som finnes."
+        )
+        comparable = common
+        months = []
+
+    summary = year_comparison_summary(comparable)
+    if summary.empty:
+        st.info("Ingen døgn med god nok dekning i de valgte årene.")
+        return
+
+    note = (
+        "Sammenligningen bruker samme del av kalenderåret for alle år, siden "
+        "inneværende år ikke er ferdig." + cutoff_note
+    )
+    if months and len(months) < 12:
+        navn = ", ".join(MONTH_NAMES[m - 1] for m in months)
+        note += (
+            f" Snittene bygger bare på månedene alle årene har god dekning for "
+            f"({navn}), slik at ulik dekning ikke leses som endring."
+        )
+    st.caption(note)
+
+    baseline_year = int(summary.iloc[0]["year"])
+    cols = st.columns(len(summary))
+    for col, (_, row) in zip(cols, summary.iterrows()):
+        with col:
+            change = row["change_pct"]
+            st.metric(
+                f"{int(row['year'])}",
+                format_number(row["mean_volume"]),
+                delta=None if change is None or pd.isna(change) else f"{float(change):+.1f} %",
+                help=(
+                    f"Snitt per døgn over {int(row['days'])} døgn med god dekning."
+                    + ("" if int(row["year"]) == baseline_year else f" Endring målt mot {baseline_year}.")
+                ),
+            )
+
+    # Grafen viser alle måneder, ikke bare de felles: da ser man selv hvilke
+    # måneder som mangler i hvilke år.
+    monthly = compare_years_monthly(common)
+    if not monthly.empty:
+        plot_df = monthly.copy()
+        plot_df["Måned"] = plot_df["month"].map(lambda m: MONTH_NAMES[int(m) - 1])
+        plot_df["År"] = plot_df["year"].astype(str)
+        chart = (
+            alt.Chart(plot_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("Måned:N", sort=MONTH_NAMES, title="Måned"),
+                xOffset=alt.XOffset("År:N"),
+                y=alt.Y("mean_volume:Q", title="Snitt per døgn"),
+                color=alt.Color("År:N", legend=alt.Legend(title="År", orient="top")),
+                tooltip=[
+                    alt.Tooltip("År:N"),
+                    alt.Tooltip("Måned:N"),
+                    alt.Tooltip("mean_volume:Q", format=",.0f", title="Snitt"),
+                    alt.Tooltip("days:Q", title="Antall døgn"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart, width="stretch")
+
+    view = summary.copy()
+    view["Snitt per døgn"] = view["mean_volume"].map(format_number)
+    view["Sum passeringer"] = view["total_volume"].map(format_number)
+    view["Endring"] = view["change_pct"].map(
+        lambda v: "referanse" if v is None or pd.isna(v) else f"{float(v):+.1f} %"
+    )
+    view = view.rename(columns={"year": "År", "days": "Døgn med god dekning"})
+    st.dataframe(
+        view[["År", "Snitt per døgn", "Sum passeringer", "Døgn med god dekning", "Endring"]],
+        width="stretch",
+        hide_index=True,
     )
 
 
+def _render_points_map(point_ids: List[str]) -> None:
+    """Kart over de valgte punktene."""
+    rows = []
+    for pid in point_ids:
+        meta = BICYCLE_POINTS.get(pid)
+        if meta:
+            rows.append({"lat": float(meta["lat"]), "lon": float(meta["lon"])})
+    if not rows:
+        return
+    st.map(pd.DataFrame(rows), zoom=10 if len(rows) > 1 else 12, size=60)
+
+
+def _render_per_point_comparison(frames_by_point: Dict[str, pd.DataFrame]) -> None:
+    """Rangér de valgte punktene mot hverandre på snitt per døgn."""
+    rows = []
+    for pid, daily in frames_by_point.items():
+        if daily is None or daily.empty:
+            continue
+        good = daily[daily["reliable"]].dropna(subset=["volume"])
+        if good.empty:
+            continue
+        meta = BICYCLE_POINTS.get(pid, {})
+        rows.append(
+            {
+                "Punkt": str(meta.get("name", pid)),
+                "Kommune": str(meta.get("municipality", "")),
+                "mean_volume": float(good["volume"].mean()),
+                "days": int(len(good)),
+            }
+        )
+    if not rows:
+        st.info("Ingen av punktene har døgn med god nok dekning.")
+        return
+
+    df = pd.DataFrame(rows).sort_values("mean_volume", ascending=False).reset_index(drop=True)
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("Punkt:N", sort="-x", title=None),
+            x=alt.X("mean_volume:Q", title="Snitt syklister per døgn"),
+            color=alt.Color("Kommune:N", legend=alt.Legend(title="Kommune", orient="top")),
+            tooltip=[
+                alt.Tooltip("Punkt:N"),
+                alt.Tooltip("Kommune:N"),
+                alt.Tooltip("mean_volume:Q", format=",.0f", title="Snitt per døgn"),
+                alt.Tooltip("days:Q", title="Døgn med god dekning"),
+            ],
+        )
+        .properties(height=max(220, 22 * len(df)))
+    )
+    st.altair_chart(chart, width="stretch")
+
+    view = df.copy()
+    view["Snitt per døgn"] = view["mean_volume"].map(format_number)
+    view = view.rename(columns={"days": "Døgn med god dekning"})
+    st.dataframe(
+        view[["Punkt", "Kommune", "Snitt per døgn", "Døgn med god dekning"]],
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_basis_note(daily: pd.DataFrame, point_count: int, aggregation: str) -> None:
+    """Si fra når summen bygger på færre punkter enn valgt."""
+    if point_count < 2 or "points_present" not in daily.columns:
+        return
+    present = pd.to_numeric(daily["points_present"], errors="coerce")
+    incomplete = int((present < point_count).sum())
+    if not incomplete:
+        return
+    if aggregation == AGG_SUM:
+        st.caption(
+            f"ℹ️ {incomplete} av {len(daily)} døgn har tall fra færre enn {point_count} punkter. "
+            "Disse er markert som lav dekning og utelatt fra snittene, siden en sum "
+            "som mangler et punkt ser ut som nedgang."
+        )
+    else:
+        st.caption(
+            f"ℹ️ {incomplete} av {len(daily)} døgn har tall fra færre enn {point_count} punkter. "
+            "Snittet per punkt tåler dette, men bygger da på et tynnere grunnlag."
+        )
+
+
+def _render_bicycle_sidebar() -> Dict[str, object]:
+    """Innstillinger for sykkelvisningen, i sidebaren som for bildataene."""
+    st.sidebar.markdown("---")
+    st.sidebar.header("🚲 Sykkelinnstillinger")
+
+    options = bicycle_point_options(include_retired=True)
+    retired_labels = [lab for lab in options if "nedlagt" in lab]
+    operational_labels = [lab for lab in options if "nedlagt" not in lab]
+
+    municipalities = sorted({str(m.get("municipality", "")) for m in BICYCLE_POINTS.values()})
+
+    with st.sidebar.form("bicycle_controls"):
+        scope = st.radio(
+            "Hvilke punkter?",
+            [SCOPE_SELECTED, SCOPE_ALL_OPERATIONAL, SCOPE_ALL, SCOPE_MUNICIPALITY],
+            key="bicycle_scope",
+            help="«Alle punkter» henter mange kall og tar lengre tid første gang.",
+        )
+
+        chosen_municipality = st.selectbox(
+            "Kommune",
+            municipalities,
+            key="bicycle_municipality",
+            disabled=scope != SCOPE_MUNICIPALITY,
+        )
+
+        chosen_labels = st.multiselect(
+            "Velg sykkelpunkt",
+            list(options.keys()),
+            default=operational_labels[:1],
+            key="bicycle_points",
+            disabled=scope != SCOPE_SELECTED,
+            help="Punkter merket «nedlagt» har historikk, men gir ingen nye tall.",
+        )
+
+        years = _available_years()
+        chosen_years = st.multiselect(
+            "År (velg flere for å sammenligne)",
+            years,
+            default=years[:2],
+            key="bicycle_years",
+        )
+
+        aggregation = st.radio(
+            "Når flere punkter er valgt",
+            [AGG_SUM, AGG_MEAN],
+            key="bicycle_aggregation",
+            help=(
+                "Sum gir samlet antall syklister, men faller når et punkt mangler data. "
+                "Snitt per punkt er robust mot datahull, men er ikke et samlet antall."
+            ),
+        )
+
+        with st.expander("🔧 Avansert"):
+            include_retired = st.checkbox(
+                "Ta med nedlagte punkter i «alle»",
+                value=False,
+                key="bicycle_include_retired",
+                help=f"{len(retired_labels)} punkter er nedlagt og gir ingen nye tall.",
+            )
+            min_coverage = st.slider(
+                "Min. dekning per døgn (%)",
+                0,
+                100,
+                int(BICYCLE_MIN_COVERAGE_PCT),
+                key="bicycle_min_coverage",
+                help="Døgn under terskelen beholder tallet, men utelates fra snittene.",
+            )
+
+        submitted = st.form_submit_button("🚲 Hent sykkeldata", type="primary")
+
+    # Løs opp utvalget til faktiske ID-er
+    if scope == SCOPE_ALL:
+        point_ids = [
+            pid
+            for pid, m in BICYCLE_POINTS.items()
+            if include_retired or m.get("operational", True)
+        ]
+    elif scope == SCOPE_ALL_OPERATIONAL:
+        point_ids = [pid for pid, m in BICYCLE_POINTS.items() if m.get("operational", True)]
+    elif scope == SCOPE_MUNICIPALITY:
+        point_ids = [
+            pid
+            for pid, m in BICYCLE_POINTS.items()
+            if str(m.get("municipality", "")) == chosen_municipality
+            and (include_retired or m.get("operational", True))
+        ]
+    else:
+        point_ids = [options[lab] for lab in chosen_labels]
+
+    return {
+        "submitted": bool(submitted),
+        "point_ids": point_ids,
+        "years": [int(y) for y in chosen_years],
+        "aggregation": aggregation,
+        "min_coverage": float(min_coverage),
+        "scope": scope,
+    }
+
+
+def _selection_label(point_ids: List[str], scope: str, aggregation: str) -> str:
+    """Kort beskrivelse av utvalget, til overskrifter og filnavn."""
+    if len(point_ids) == 1:
+        meta = BICYCLE_POINTS.get(point_ids[0], {})
+        return f"{meta.get('name', point_ids[0])} ({meta.get('municipality', '')})"
+    hva = "sum" if aggregation == AGG_SUM else "snitt per punkt"
+    if scope == SCOPE_MUNICIPALITY:
+        kommuner = {str(BICYCLE_POINTS[p]["municipality"]) for p in point_ids if p in BICYCLE_POINTS}
+        if len(kommuner) == 1:
+            return f"{kommuner.pop()} — {len(point_ids)} punkter ({hva})"
+    return f"{len(point_ids)} sykkelpunkter ({hva})"
+
+
 def render_bicycle_tab() -> None:
-    """Sykkelfanen: eget punkt- og årsvalg, henter data på klikk."""
+    """Sykkelfanen: flere punkter, flere år, innstillinger i sidebaren."""
     st.subheader("🚲 Sykkeltrafikk på Nord-Jæren")
     st.caption(
         "Døgntall fra Statens vegvesens sykkelregistreringspunkter. Døgn er "
         "hovedvisningen fordi sykling er værstyrt og varierer kraftig gjennom uka."
     )
 
-    options = bicycle_point_options(include_retired=True)
-    if not options:
+    if not BICYCLE_POINTS:
         st.info("Ingen sykkelpunkter er konfigurert.")
         return
 
-    years = _available_years()
-    with st.form("bicycle_controls"):
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            label = st.selectbox(
-                "Velg sykkelpunkt",
-                list(options.keys()),
-                key="bicycle_point",
-                help="Punkter merket «nedlagt» har historikk, men gir ingen nye tall.",
-            )
-        with c2:
-            year = st.selectbox("År", years, key="bicycle_year")
-        submitted = st.form_submit_button("🚲 Hent sykkeldata", type="primary")
+    settings = _render_bicycle_sidebar()
 
-    if submitted:
-        point_id = options[label]
-        meta = BICYCLE_POINTS.get(point_id, {})
-        retired = not bool(meta.get("operational", True))
-        with st.spinner(f"Henter døgndata for {label} i {year} …"):
-            payload = fetch_bicycle_year(
-                point_id,
-                int(year),
-                timeout_s=int(st.session_state.get("timeout_s", 60)),
-                use_cache=bool(st.session_state.get("use_cache", True)),
-            )
-        daily = parse_daily_volumes(payload)
-        st.session_state.bicycle_result = {
-            "daily": daily,
-            "label": label,
-            "point_id": point_id,
-            "year": int(year),
-            "retired": retired,
-        }
+    if settings["submitted"]:
+        point_ids = settings["point_ids"]
+        years = settings["years"]
+        if not point_ids:
+            st.sidebar.warning("Velg minst ett sykkelpunkt")
+        elif not years:
+            st.sidebar.warning("Velg minst ett år")
+        else:
+            with st.spinner(
+                f"Henter døgndata for {len(point_ids)} punkt(er) × {len(years)} år …"
+            ):
+                raw = fetch_bicycle_points_years(
+                    point_ids,
+                    years,
+                    timeout_s=int(st.session_state.get("timeout_s", 60)),
+                    use_cache=bool(st.session_state.get("use_cache", True)),
+                )
+            min_cov = settings["min_coverage"]
+            # {år: {punkt: døgn-df}}
+            parsed = {
+                year: {
+                    pid: parse_daily_volumes(payload, min_coverage_pct=min_cov)
+                    for pid, payload in by_point.items()
+                }
+                for year, by_point in raw.items()
+            }
+            st.session_state.bicycle_result = {
+                "parsed": parsed,
+                "point_ids": point_ids,
+                "years": years,
+                "aggregation": settings["aggregation"],
+                "scope": settings["scope"],
+                "min_coverage": min_cov,
+            }
 
     result = st.session_state.get("bicycle_result")
     if not result:
-        st.info("Velg sykkelpunkt og år, og trykk «Hent sykkeldata».")
+        st.info("Velg punkter og år under «🚲 Sykkelinnstillinger» i sidebaren, og trykk «Hent sykkeldata».")
         return
 
-    daily = result["daily"]
-    label = result["label"]
-    year = result["year"]
+    parsed: Dict[int, Dict[str, pd.DataFrame]] = result["parsed"]
+    point_ids: List[str] = result["point_ids"]
+    aggregation: str = result["aggregation"]
+    label = _selection_label(point_ids, result["scope"], aggregation)
 
-    if result["retired"]:
-        st.warning(
-            f"⚠️ {label} er nedlagt. Punktet har historikk, men gir ingen tall for "
-            "inneværende år — manglende data her er ikke et datahull."
-        )
-
-    if daily is None or daily.empty:
+    if not parsed:
         st.error(
-            f"❌ Ingen sykkeldata for {label} i {year}. "
-            "Punktet kan mangle registreringer for dette året."
+            "❌ Ingen sykkeldata for utvalget. Punktene kan mangle registreringer "
+            "for de valgte årene."
         )
         return
 
-    st.markdown(f"**{label} — {year}**")
-    _render_coverage_banner(coverage_summary(daily))
-    _render_metrics(daily)
+    retired_valgt = [
+        str(BICYCLE_POINTS[p]["name"])
+        for p in point_ids
+        if p in BICYCLE_POINTS and not BICYCLE_POINTS[p].get("operational", True)
+    ]
+    if retired_valgt:
+        st.warning(
+            f"⚠️ Nedlagte punkter i utvalget: {', '.join(retired_valgt)}. De har historikk, "
+            "men gir ingen tall for inneværende år — manglende data der er ikke et datahull."
+        )
 
+    # Summen krever at alle punkter har tall hvert døgn, ellers faller den ved
+    # hvert datahull. Med mange punkter valgt er det uoppnåelig, så summen
+    # bygges på et balansert panel av punkter med god dekning i alle årene.
+    panel: List[str] = []
+    if aggregation == AGG_SUM and len(point_ids) > 1:
+        panel = panel_point_ids(parsed)
+        if not panel:
+            st.error(
+                "❌ Ingen av punktene har god nok dekning i alle de valgte årene til "
+                "å kunne summeres. Velg «Snitt per punkt», færre år eller færre punkter."
+            )
+            return
+        parsed = {
+            year: {pid: f for pid, f in by_point.items() if pid in panel}
+            for year, by_point in parsed.items()
+        }
+        utelatt = len(point_ids) - len(panel)
+        if utelatt:
+            st.info(
+                f"ℹ️ Summen bygger på {len(panel)} av {len(point_ids)} punkter. "
+                f"{utelatt} punkter er utelatt fordi de mangler data i minst ett av "
+                "årene — å ta dem med ville gjort summen lavere i de årene de mangler, "
+                "og det ville lest som nedgang i sykling."
+            )
+
+    # Slå punkter sammen til én serie per år
+    aggregate = sum_points_daily if aggregation == AGG_SUM else mean_points_daily
+    effective_points = panel or point_ids
+    frames: Dict[int, pd.DataFrame] = {}
+    for year, by_point in parsed.items():
+        if len(effective_points) == 1:
+            only = next(iter(by_point.values()), None)
+            if only is not None and not only.empty:
+                frames[year] = only
+        else:
+            combined = aggregate(by_point)
+            if not combined.empty:
+                frames[year] = combined
+
+    if not frames:
+        st.error("❌ Ingen døgn med data i utvalget.")
+        return
+
+    years_with_data = sorted(frames)
+    st.markdown(f"**{label} — {', '.join(str(y) for y in years_with_data)}**")
+
+    if len(years_with_data) > 1:
+        st.markdown("### 📅 Sammenligning mellom år")
+        _render_year_comparison(frames)
+        st.markdown("---")
+
+    # Detaljvisningen gjelder det nyeste året
+    latest = years_with_data[-1]
+    daily = frames[latest]
+    st.markdown(f"### 🔍 Detaljer for {latest}")
+    _render_coverage_banner(coverage_summary(daily))
+    _render_basis_note(daily, len(effective_points), aggregation)
+    _render_metrics(daily)
     _render_daily_chart(daily, label)
 
     c1, c2 = st.columns(2)
@@ -292,30 +671,36 @@ def render_bicycle_tab() -> None:
         st.markdown("**Sesongprofil**")
         _render_season_chart(daily)
 
-    with st.expander("🗺️ Hvor står punktet?"):
-        _render_map(result["point_id"])
+    if len(point_ids) > 1:
+        with st.expander(f"🏆 Sammenligning mellom punkter ({latest})", expanded=False):
+            _render_per_point_comparison(parsed.get(latest, {}))
+
+    with st.expander("🗺️ Hvor står punktene?"):
+        _render_points_map(point_ids)
 
     with st.expander("📊 Døgndata"):
         view = daily.copy()
         view["date"] = pd.to_datetime(view["date"]).dt.strftime("%d.%m.%Y")
-        view = view.rename(
-            columns={
-                "date": "Dato",
-                "volume": "Syklister",
-                "coverage_pct": "Dekning (%)",
-                "weekday_name": "Ukedag",
-                "season": "Sesong",
-                "reliable": "God dekning",
-            }
-        )
-        st.dataframe(
-            view[["Dato", "Ukedag", "Syklister", "Dekning (%)", "Sesong", "God dekning"]],
-            width="stretch",
-            hide_index=True,
+        rename = {
+            "date": "Dato",
+            "volume": "Syklister",
+            "coverage_pct": "Dekning (%)",
+            "weekday_name": "Ukedag",
+            "season": "Sesong",
+            "reliable": "God dekning",
+            "points_present": "Punkter med tall",
+        }
+        view = view.rename(columns=rename)
+        vis_kolonner = [c for c in rename.values() if c in view.columns]
+        st.dataframe(view[vis_kolonner], width="stretch", hide_index=True)
+
+        # Full CSV med alle år, ikke bare det som vises
+        eksport = pd.concat(
+            [f.assign(year=y) for y, f in sorted(frames.items())], ignore_index=True
         )
         st.download_button(
             "⬇️ Last ned som CSV",
-            data=daily.to_csv(index=False).encode("utf-8"),
-            file_name=f"sykkel_{result['point_id']}_{year}.csv",
+            data=eksport.to_csv(index=False).encode("utf-8"),
+            file_name=f"sykkel_{len(point_ids)}punkt_{years_with_data[0]}-{years_with_data[-1]}.csv",
             mime="text/csv",
         )

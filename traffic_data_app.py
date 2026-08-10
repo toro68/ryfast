@@ -6,6 +6,8 @@ hovedmodulen er endret til `streamlit_app.py` i dashbordet — appen faller ned
 med «Main module does not exist» i samme øyeblikk fila forsvinner.
 """
 
+import ryfast_app.arrow_compat  # noqa: F401  (setter Arrow-allokator, må skje først)
+
 from ryfast_app.app import main
 
 if __name__ == "__main__":

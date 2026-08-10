@@ -199,6 +199,249 @@ def coverage_summary(daily: pd.DataFrame) -> Dict[str, object]:
     }
 
 
+def sum_points_daily(frames_by_point: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Summer flere punkter til én døgnserie, med antall punkter bak hvert døgn.
+
+    Bare pålitelige døgn summeres. Et døgn regnes som pålitelig for summen
+    først når *alle* valgte punkter har tall: ellers ville summen falle når et
+    punkt mangler data, og det ville lese som nedgang i sykling framfor et
+    datahull. `points_present`/`points_expected` gjør grunnlaget synlig.
+    """
+    cols = [
+        "date", "volume", "coverage_pct", "weekday", "weekday_name",
+        "is_weekend", "month", "season", "reliable",
+        "points_present", "points_expected",
+    ]
+    usable = {pid: f for pid, f in frames_by_point.items() if f is not None and not f.empty}
+    if not usable:
+        return pd.DataFrame(columns=cols)
+
+    expected = len(usable)
+    parts = []
+    for pid, frame in usable.items():
+        part = frame[["date", "volume", "coverage_pct", "reliable"]].copy()
+        part["point_id"] = pid
+        parts.append(part)
+    long_df = pd.concat(parts, ignore_index=True)
+
+    # Bare pålitelige døgn bidrar til summen; resten teller som fraværende.
+    good = long_df[long_df["reliable"] & long_df["volume"].notna()]
+    if good.empty:
+        return pd.DataFrame(columns=cols)
+
+    grouped = (
+        good.groupby("date")
+        .agg(
+            volume=("volume", "sum"),
+            coverage_pct=("coverage_pct", "mean"),
+            points_present=("point_id", "nunique"),
+        )
+        .reset_index()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    grouped["points_expected"] = expected
+
+    dates = pd.to_datetime(grouped["date"])
+    grouped["weekday"] = dates.dt.weekday
+    grouped["weekday_name"] = grouped["weekday"].map(lambda i: WEEKDAY_NAMES[int(i)])
+    grouped["is_weekend"] = grouped["weekday"] >= 5
+    grouped["month"] = dates.dt.month
+    grouped["season"] = grouped["month"].map(SEASON_BY_MONTH)
+    grouped["reliable"] = grouped["points_present"] >= expected
+    return grouped[cols]
+
+
+def mean_points_daily(frames_by_point: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Snitt per punkt per døgn, som tåler at et punkt mangler.
+
+    Nivået er robust mot datahull — motsatt av summen — men kan ikke leses som
+    et samlet antall syklister.
+    """
+    summed = sum_points_daily(frames_by_point)
+    if summed.empty:
+        return summed
+    out = summed.copy()
+    out["volume"] = out["volume"] / out["points_present"]
+    # Snittet er meningsfullt selv når ett punkt mangler.
+    out["reliable"] = out["points_present"] > 0
+    return out
+
+
+def panel_point_ids(
+    frames_by_year: Dict[int, Dict[str, pd.DataFrame]],
+    min_reliable_share: float = 0.9,
+) -> List[str]:
+    """Punkter med god nok dekning i *alle* årene — grunnlaget for en sum.
+
+    Nødvendig fordi `sum_points_daily` krever at alle punkter har tall for at
+    et døgn skal regnes som pålitelig. Med mange punkter valgt finnes det da
+    knapt et slikt døgn: ett punkt uten data hele året nuller ut hele summen.
+    Å slippe kravet er ikke et alternativ — da faller summen ved hvert datahull
+    og leses som nedgang i sykling.
+
+    Løsningen er et balansert panel: bare punkter som er pålitelige minst
+    `min_reliable_share` av døgnene i hvert år blir med. Da er «alle til stede»
+    oppnåelig, og summen måler de samme punktene i alle årene, slik at et
+    nivåskift ikke kan komme av at utvalget endret seg.
+    """
+    if not frames_by_year:
+        return []
+
+    per_year_ok = []
+    for frames in frames_by_year.values():
+        usable = {pid: f for pid, f in (frames or {}).items() if f is not None and not f.empty}
+        if not usable:
+            continue
+        # Antall døgn i året måles på det punktet som dekker perioden bredest,
+        # slik at terskelen ikke blir lettere for punkter med kort serie.
+        days_in_year = max(len(f) for f in usable.values())
+        if not days_in_year:
+            continue
+        ok = {
+            pid
+            for pid, f in usable.items()
+            if int(f["reliable"].sum()) >= days_in_year * float(min_reliable_share)
+        }
+        per_year_ok.append(ok)
+
+    if not per_year_ok:
+        return []
+    return sorted(set.intersection(*per_year_ok))
+
+
+def common_period_cutoff(frames: Dict[int, pd.DataFrame]) -> Optional[tuple]:
+    """Siste (måned, dag) som *alle* årene har data til og med.
+
+    Inneværende år er avkortet mot dagens dato. Uten en felles slutt ville et
+    delår blitt målt mot et helår, og sammenligningen ville sagt mer om hvor
+    langt året er kommet enn om sykkeltrafikken.
+    """
+    cutoffs = []
+    for daily in frames.values():
+        if daily is None or daily.empty:
+            continue
+        dates = pd.to_datetime(daily["date"])
+        # Maks framfor siste rad: uavhengig av sortering i input.
+        cutoffs.append(max(zip(dates.dt.month, dates.dt.day)))
+    return min(cutoffs) if cutoffs else None
+
+
+def restrict_to_common_period(frames: Dict[int, pd.DataFrame]) -> Dict[int, pd.DataFrame]:
+    """Kutt alle årene til samme del av kalenderåret.
+
+    Sammenligningen skjer på (måned, dag) framfor dagnummer, slik at datoene
+    stemmer overens på tvers av skuddår. 29. februar blir dermed med i skuddår
+    og gir det året én dag mer, men vi sammenligner snitt per døgn, så det
+    påvirker ikke nivåene.
+    """
+    cutoff = common_period_cutoff(frames)
+    if cutoff is None:
+        return {}
+    out = {}
+    for year, daily in frames.items():
+        if daily is None or daily.empty:
+            continue
+        dates = pd.to_datetime(daily["date"])
+        mask = [(m, d) <= cutoff for m, d in zip(dates.dt.month, dates.dt.day)]
+        out[year] = daily[pd.Series(mask, index=daily.index)].copy()
+    return out
+
+
+def comparable_months(frames: Dict[int, pd.DataFrame], reliable_only: bool = True) -> List[int]:
+    """Måneder der *alle* årene har pålitelige døgn.
+
+    Nødvendig fordi dekningen varierer kraftig mellom år: et år kan ha mistet
+    hele vinteren, og et årssnitt ville da sammenlignet sommer mot helår.
+    Sykkeltrafikken er 3–4 ganger høyere om sommeren enn om vinteren, så det
+    gir en «endring» som bare gjenspeiler hvilke måneder som overlevde
+    dekningsterskelen.
+    """
+    per_year = []
+    for daily in frames.values():
+        if daily is None or daily.empty:
+            continue
+        src = daily[daily["reliable"]] if reliable_only else daily
+        src = src.dropna(subset=["volume"])
+        if src.empty:
+            continue
+        per_year.append(set(int(m) for m in src["month"].unique()))
+    if not per_year:
+        return []
+    return sorted(set.intersection(*per_year))
+
+
+def restrict_to_comparable_months(
+    frames: Dict[int, pd.DataFrame], reliable_only: bool = True
+) -> Dict[int, pd.DataFrame]:
+    """Behold bare måneder alle årene har pålitelige tall for."""
+    months = comparable_months(frames, reliable_only=reliable_only)
+    if not months:
+        return {}
+    return {
+        year: daily[daily["month"].isin(months)].copy()
+        for year, daily in frames.items()
+        if daily is not None and not daily.empty
+    }
+
+
+def compare_years_monthly(frames: Dict[int, pd.DataFrame], reliable_only: bool = True) -> pd.DataFrame:
+    """Månedssnitt per år i lang form, til en gruppert søylegraf.
+
+    Kolonner: year, month, mean_volume, days.
+    """
+    rows = []
+    for year, daily in sorted(frames.items()):
+        profile = monthly_profile(daily, reliable_only=reliable_only)
+        if profile.empty:
+            continue
+        profile = profile.copy()
+        profile["year"] = int(year)
+        rows.append(profile)
+    if not rows:
+        return pd.DataFrame(columns=["year", "month", "mean_volume", "days"])
+    return pd.concat(rows, ignore_index=True)[["year", "month", "mean_volume", "days"]]
+
+
+def year_comparison_summary(
+    frames: Dict[int, pd.DataFrame], reliable_only: bool = True
+) -> pd.DataFrame:
+    """Nøkkeltall per år, med endring mot det eldste året i utvalget.
+
+    Kolonner: year, mean_volume, total_volume, days, change_pct. `change_pct`
+    er NaN for referanseåret og for år der referansen mangler eller er null —
+    kallstedet må bruke pd.isna(), ikke `is None`.
+    """
+    cols = ["year", "mean_volume", "total_volume", "days", "change_pct"]
+    rows = []
+    for year, daily in sorted(frames.items()):
+        if daily is None or daily.empty:
+            continue
+        src = daily[daily["reliable"]] if reliable_only else daily
+        src = src.dropna(subset=["volume"])
+        if src.empty:
+            continue
+        rows.append(
+            {
+                "year": int(year),
+                "mean_volume": float(src["volume"].mean()),
+                "total_volume": float(src["volume"].sum()),
+                "days": int(len(src)),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    out = pd.DataFrame(rows).sort_values("year").reset_index(drop=True)
+    baseline = out.iloc[0]["mean_volume"]
+    if baseline:
+        out["change_pct"] = (out["mean_volume"] - baseline) / baseline * 100.0
+        out.loc[0, "change_pct"] = None
+    else:
+        out["change_pct"] = None
+    return out[cols]
+
+
 def year_to_date_range(year: int, today: Optional[date] = None) -> tuple:
     """Fra 1. januar til og med i går for inneværende år, ellers hele året.
 

@@ -17,6 +17,7 @@ from ryfast_app.config import (
     BICYCLE_MAX_PAGES,
     DATA_START_YEAR,
     MAX_BATCH_WORKERS,
+    MAX_BICYCLE_WORKERS,
     MAX_WEEKLY_WORKERS,
     QUERY_TEMPLATE,
     WEEKLY_QUERY_TEMPLATE,
@@ -269,3 +270,78 @@ def fetch_bicycle_year(
     # `to` er eksklusiv i byDay, så vi ber om midnatt dagen etter sluttdatoen.
     to_str = datetime.combine(end + timedelta(days=1), time(0, 0), tzinfo=OSLO_TZ).isoformat()
     return fetch_bicycle_daily_data(point_id, from_str, to_str, timeout_s, use_cache)
+
+
+def fetch_bicycle_years(
+    point_id: str,
+    years: List[int],
+    timeout_s: int,
+    use_cache: bool,
+    today: Optional[date] = None,
+) -> Dict[int, Optional[Dict]]:
+    """Hent flere år for ett punkt, ett år per tråd.
+
+    Årene er uavhengige, så de hentes parallelt — men hvert år pagineres
+    fortsatt sekvensielt inni seg, siden hver markør kommer fra forrige svar.
+    År uten data utelates fra svaret framfor å bli med som None, slik at
+    kallstedet ikke må filtrere.
+    """
+    wanted = sorted({int(y) for y in years})
+    if not point_id or not wanted:
+        return {}
+
+    result: Dict[int, Optional[Dict]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(wanted), MAX_BATCH_WORKERS)) as executor:
+        future_to_year = {
+            executor.submit(fetch_bicycle_year, point_id, y, timeout_s, use_cache, today): y
+            for y in wanted
+        }
+        for future in as_completed(future_to_year):
+            year = future_to_year[future]
+            try:
+                payload = future.result()
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.error("Feil ved henting av sykkeldata for %s, år %s: %s", point_id, year, exc)
+                record_api_error(f"Sykkelpunkt {point_id} feil (år {year}): {exc}")
+                continue
+            if payload is not None:
+                result[year] = payload
+    return dict(sorted(result.items()))
+
+
+def fetch_bicycle_points_years(
+    point_ids: List[str],
+    years: List[int],
+    timeout_s: int,
+    use_cache: bool,
+    today: Optional[date] = None,
+) -> Dict[int, Dict[str, Dict]]:
+    """Hent alle kombinasjoner av punkt og år: {år: {punkt_id: payload}}.
+
+    Hvert (punkt, år)-par er uavhengig, så alle hentes parallelt. Med «alle
+    punkter» over flere år blir det mange kall, derfor et eget, høyere
+    trådtak enn batch-henting for bil.
+    """
+    wanted_points = [p for p in dict.fromkeys(point_ids) if p]
+    wanted_years = sorted({int(y) for y in years})
+    if not wanted_points or not wanted_years:
+        return {}
+
+    result: Dict[int, Dict[str, Dict]] = {}
+    jobs = [(pid, y) for pid in wanted_points for y in wanted_years]
+    with ThreadPoolExecutor(max_workers=min(len(jobs), MAX_BICYCLE_WORKERS)) as executor:
+        futures = {
+            executor.submit(fetch_bicycle_year, pid, y, timeout_s, use_cache, today): (pid, y)
+            for pid, y in jobs
+        }
+        for future in as_completed(futures):
+            pid, year = futures[future]
+            try:
+                payload = future.result()
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.error("Feil ved henting av sykkeldata for %s, år %s: %s", pid, year, exc)
+                record_api_error(f"Sykkelpunkt {pid} feil (år {year}): {exc}")
+                continue
+            if payload is not None:
+                result.setdefault(year, {})[pid] = payload
+    return dict(sorted(result.items()))
