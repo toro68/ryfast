@@ -24,6 +24,7 @@ from ryfast_app.ui.banners import (
     render_api_status_sidebar,
     render_data_coverage_banner,
     render_point_basis_note,
+    reserve_api_status_sidebar,
 )
 from ryfast_app.ui.bicycle_tab import render_bicycle_tab
 from ryfast_app.ui.comparisons import create_comparison_dashboard
@@ -145,7 +146,7 @@ def main():
 
         submitted = st.form_submit_button("📊 Analyser data", type="primary")
 
-    render_api_status_sidebar()
+    api_status_slot = reserve_api_status_sidebar()
 
     if st.sidebar.button("🗑️ Tøm cache"):
         st.cache_data.clear()
@@ -233,6 +234,20 @@ def main():
                     "estimate_missing_points": bool(estimate_missing_points),
                 }
 
+    try:
+        _render_tabs()
+    finally:
+        # Til slutt, uansett utfall: fanene over rekker å registrere API-feil
+        # etter at sidebaren er tegnet, og de skal med i samme rerun.
+        render_api_status_sidebar(api_status_slot)
+
+
+def _render_tabs() -> None:
+    """Tegn de seks fanene. Alt de trenger ligger i `st.session_state`.
+
+    Egen funksjon slik at `main()` kan flushe API-feil til sidebaren *etter*
+    at fanene er kjørt, uten at en tidlig `return` her hopper over flushen.
+    """
     tabs = st.tabs(
         ["📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport", "🚲 Sykkel"]
     )
