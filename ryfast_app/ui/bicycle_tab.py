@@ -6,10 +6,14 @@ data på klikk, uavhengig av bilanalysen i de andre fanene.
 Døgn er hovedvisningen fordi sykling er værstyrt og har markert ukesrytme; et
 månedssnitt skjuler nettopp det som er interessant.
 
-To fallgruver som styrer visningen, begge synlige i ekte data:
+Tre fallgruver som styrer visningen, alle synlige i ekte data:
 - Summerer man flere punkter, faller summen når ett punkt mangler data. Det
   ser ut som nedgang i sykling. Derfor krever et pålitelig døgn at alle valgte
   punkter har tall, og `points_present` gjør grunnlaget synlig.
+- Snittet per punkt faller ikke ved datahull, men skifter nivå når utvalget
+  endres: punktene har svært ulikt volum, så døgn med få punkter ligger høyere
+  enn døgn med alle. Begge aggregeringene bruker derfor et balansert panel når
+  flere år sammenlignes.
 - Dekningen varierer mellom år. Et år kan ha mistet hele vinteren, og siden
   sommertrafikken er 3-4x vintertrafikken, ville et årssnitt sammenlignet
   sommer mot helår. Årssammenligningen bruker derfor bare felles måneder.
@@ -31,6 +35,7 @@ from ryfast_app.bicycle import (
     comparable_months,
     compare_years_monthly,
     coverage_summary,
+    days_expected_in_year,
     mean_points_daily,
     monthly_profile,
     panel_point_ids,
@@ -76,6 +81,7 @@ def _render_coverage_banner(summary: Dict[str, object]) -> None:
         return
     days_reliable = int(summary.get("days_reliable") or 0)
     days_missing = int(summary.get("days_missing") or 0)
+    days_absent = int(summary.get("days_absent") or 0)
     mean_cov = summary.get("mean_coverage_pct")
     cov_text = f"{float(mean_cov):.0f} %" if mean_cov is not None and pd.notna(mean_cov) else "ukjent"
 
@@ -85,6 +91,13 @@ def _render_coverage_banner(summary: Dict[str, object]) -> None:
     )
     if days_missing:
         melding += f" {days_missing} døgn mangler tall helt."
+    # Snittdekningen måles bare på døgn som finnes som rad, så den kan stå på
+    # 100 % samtidig som store deler av perioden mangler. Si det eksplisitt.
+    if days_absent:
+        melding += (
+            f" Av disse finnes {days_absent} døgn ikke i datagrunnlaget i det hele tatt, "
+            "så snittdekningen over gjelder bare de øvrige døgnene."
+        )
 
     # Sykkeltall er små, så lav dekning slår kraftigere ut enn for bil.
     if days_reliable == days_total:
@@ -188,24 +201,28 @@ def _render_season_chart(daily: pd.DataFrame) -> None:
     st.altair_chart(chart, width="stretch")
 
 
-def _render_metrics(daily: pd.DataFrame) -> None:
+def _render_metrics(daily: pd.DataFrame, aggregation: str = AGG_SUM) -> None:
     reliable = daily[daily["reliable"]].dropna(subset=["volume"])
     split = weekend_vs_weekday(daily)
+    er_snitt = aggregation == AGG_MEAN and "points_present" in daily.columns
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         snitt = reliable["volume"].mean() if not reliable.empty else None
-        st.metric("Snitt per døgn", format_number(snitt) if snitt is not None else "N/A")
+        st.metric(
+            "Snitt per døgn per punkt" if er_snitt else "Snitt per døgn",
+            format_number(snitt) if snitt is not None else "N/A",
+        )
     with c2:
         if reliable.empty:
             st.metric("Travleste døgn", "N/A")
         else:
             top = reliable.loc[reliable["volume"].idxmax()]
-            st.metric(
-                "Travleste døgn",
-                format_number(top["volume"]),
-                help=f"{top['weekday_name']} {top['date']:%d.%m.%Y}",
-            )
+            hjelp = f"{top['weekday_name']} {top['date']:%d.%m.%Y}"
+            if er_snitt:
+                # Uten dette leses ett punkts døgntall som utvalgets travleste.
+                hjelp += f" — snitt over {int(top['points_present'])} punkter, ikke et samlet døgntall."
+            st.metric("Travleste døgn", format_number(top["volume"]), help=hjelp)
     with c3:
         st.metric(
             "Hverdag vs helg",
@@ -217,11 +234,23 @@ def _render_metrics(daily: pd.DataFrame) -> None:
         )
     with c4:
         total = reliable["volume"].sum() if not reliable.empty else 0
-        st.metric(
-            "Sum passeringer",
-            format_number(total),
-            help="Sum over døgn med god dekning; ikke et fullstendig årstall når døgn mangler.",
-        )
+        if er_snitt:
+            # En sum av per-punkt-snitt er ikke passeringer: i ekte data ga den
+            # 41 252 der de samme døgnene hadde 53 796 faktiske passeringer.
+            st.metric(
+                "Snitt per punkt, sum av døgn",
+                format_number(total),
+                help=(
+                    "Summen av døgnsnittene, ikke antall passeringer — velg "
+                    "«Sum (samlet antall)» for et passeringstall."
+                ),
+            )
+        else:
+            st.metric(
+                "Sum passeringer",
+                format_number(total),
+                help="Sum over døgn med god dekning; ikke et fullstendig årstall når døgn mangler.",
+            )
 
 
 def _render_year_comparison(frames: Dict[int, pd.DataFrame]) -> None:
@@ -603,30 +632,48 @@ def render_bicycle_tab() -> None:
             "men gir ingen tall for inneværende år — manglende data der er ikke et datahull."
         )
 
-    # Summen krever at alle punkter har tall hvert døgn, ellers faller den ved
-    # hvert datahull. Med mange punkter valgt er det uoppnåelig, så summen
-    # bygges på et balansert panel av punkter med god dekning i alle årene.
+    # Begge aggregeringene trenger et balansert panel når flere år sammenlignes,
+    # men av to ulike grunner: summen faller ved hvert datahull, og snittet
+    # skifter nivå når utvalget endres (punktene har svært ulikt volum). Uten
+    # panelet måler vi ulike punkter i ulike år, og et nivåskift leses som
+    # endring i sykling.
     panel: List[str] = []
-    if aggregation == AGG_SUM and len(point_ids) > 1:
+    flere_aar = len(parsed) > 1
+    if len(point_ids) > 1 and (aggregation == AGG_SUM or flere_aar):
         panel = panel_point_ids(parsed)
         if not panel:
-            st.error(
-                "❌ Ingen av punktene har god nok dekning i alle de valgte årene til "
-                "å kunne summeres. Velg «Snitt per punkt», færre år eller færre punkter."
+            if aggregation == AGG_SUM:
+                st.error(
+                    "❌ Ingen av punktene har god nok dekning i alle de valgte årene til "
+                    "å kunne summeres. Velg «Snitt per punkt», færre år eller færre punkter."
+                )
+                return
+            st.warning(
+                "⚠️ Ingen av punktene har god nok dekning i alle de valgte årene, så "
+                "snittene måler ulike punkter i ulike år. Siden punktene har svært "
+                "ulikt volum, kan et nivåskift her komme av utvalget framfor av "
+                "sykkeltrafikken. Velg færre år eller færre punkter."
             )
-            return
-        parsed = {
-            year: {pid: f for pid, f in by_point.items() if pid in panel}
-            for year, by_point in parsed.items()
-        }
-        utelatt = len(point_ids) - len(panel)
-        if utelatt:
-            st.info(
-                f"ℹ️ Summen bygger på {len(panel)} av {len(point_ids)} punkter. "
-                f"{utelatt} punkter er utelatt fordi de mangler data i minst ett av "
-                "årene — å ta dem med ville gjort summen lavere i de årene de mangler, "
-                "og det ville lest som nedgang i sykling."
-            )
+        else:
+            parsed = {
+                year: {pid: f for pid, f in by_point.items() if pid in panel}
+                for year, by_point in parsed.items()
+            }
+            utelatt = len(point_ids) - len(panel)
+            if utelatt:
+                hvorfor = (
+                    "å ta dem med ville gjort summen lavere i de årene de mangler, "
+                    "og det ville lest som nedgang i sykling."
+                    if aggregation == AGG_SUM
+                    else "med dem ville snittet målt ulike punkter i ulike år, og siden "
+                    "punktene har svært ulikt volum ville nivåskiftet lest som endring."
+                )
+                hva = "Summen" if aggregation == AGG_SUM else "Sammenligningen"
+                st.info(
+                    f"ℹ️ {hva} bygger på {len(panel)} av {len(point_ids)} punkter. "
+                    f"{utelatt} punkter er utelatt fordi de mangler data i minst ett av "
+                    f"årene — {hvorfor}"
+                )
 
     # Slå punkter sammen til én serie per år
     aggregate = sum_points_daily if aggregation == AGG_SUM else mean_points_daily
@@ -658,9 +705,13 @@ def render_bicycle_tab() -> None:
     latest = years_with_data[-1]
     daily = frames[latest]
     st.markdown(f"### 🔍 Detaljer for {latest}")
-    _render_coverage_banner(coverage_summary(daily))
+    # Nevneren er periodens lengde, ikke antall rader: døgn der ingen punkter
+    # har tall finnes ikke som rad i aggregatet.
+    _render_coverage_banner(
+        coverage_summary(daily, days_expected=days_expected_in_year(latest))
+    )
     _render_basis_note(daily, len(effective_points), aggregation)
-    _render_metrics(daily)
+    _render_metrics(daily, aggregation)
     _render_daily_chart(daily, label)
 
     c1, c2 = st.columns(2)

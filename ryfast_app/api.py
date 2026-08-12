@@ -84,22 +84,39 @@ def _fetch_data_uncached(query: str, timeout_s: int) -> Optional[Dict]:
 
 @st.cache_data(ttl=API_CACHE_TTL, show_spinner=False)
 def _fetch_data_cached(query: str, timeout_s: int) -> Optional[Dict]:
-    return _fetch_data_uncached(query, timeout_s)
+    """Cachet kall som *kaster* ved feil framfor å returnere None.
+
+    Feilen må boble ut: `st.cache_data` mellomlagrer returverdier, men ikke
+    unntak. Fanget vi feilen her og returnerte None, ville et forbigående
+    nettverksbrudd blitt cachet i `API_CACHE_TTL` (et døgn) — punktet ville
+    stått tomt i appen resten av dagen selv om API-et ble friskt igjen, og
+    «Tøm cache» var eneste vei ut. Kallstedet oversetter til None.
+    """
+    return post_graphql(query, timeout_s)
 
 
 def fetch_data(query: str, timeout_s: int, use_cache: bool) -> Optional[Dict]:
-    return _fetch_data_cached(query, timeout_s) if use_cache else _fetch_data_uncached(query, timeout_s)
+    """Hent én spørring, med None ved feil. Feil cachees aldri."""
+    if not use_cache:
+        return _fetch_data_uncached(query, timeout_s)
+    try:
+        return _fetch_data_cached(query, timeout_s)
+    except VegvesenApiError as exc:
+        logger.error("API-kall feilet: %s", exc)
+        record_api_error(str(exc), query=query)
+        return None
 
 
 def fetch_batch_traffic_data(point_ids: List[str], year: int, timeout_s: int, use_cache: bool) -> Dict[str, List[Dict]]:
     if year < DATA_START_YEAR or not point_ids:
         return {}
 
-    fetch_fn = _fetch_data_cached if use_cache else _fetch_data_uncached
     result: Dict[str, List[Dict]] = {}
     with ThreadPoolExecutor(max_workers=min(len(point_ids), MAX_BATCH_WORKERS)) as executor:
         future_to_point = {
-            executor.submit(fetch_fn, QUERY_TEMPLATE.format(point_id=pid, year=year), timeout_s): pid
+            executor.submit(
+                fetch_data, QUERY_TEMPLATE.format(point_id=pid, year=year), timeout_s, use_cache
+            ): pid
             for pid in point_ids
         }
         for future in as_completed(future_to_point):
@@ -135,11 +152,9 @@ def fetch_weekly_traffic_data(
 
     result: Dict[str, Dict[str, float]] = {}
     cov_result: Dict[str, Dict[str, float]] = {}
-    fetch_fn = _fetch_data_cached if use_cache else _fetch_data_uncached
-
     def _fetch_one(week_num: int, point_id: str, from_date: str, to_date: str):
         query = WEEKLY_QUERY_TEMPLATE.format(point_id=point_id, from_date=from_date, to_date=to_date)
-        return week_num, point_id, fetch_fn(query, timeout_s)
+        return week_num, point_id, fetch_data(query, timeout_s, use_cache)
 
     max_workers = min(len(valid_weeks) * len(point_ids), MAX_WEEKLY_WORKERS)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -229,6 +244,11 @@ def fetch_bicycle_daily_data(
                 point_id,
                 len(edges),
             )
+            # Også i feilpanelet: en avkortet serie ser ut som manglende
+            # sykling, og da må brukeren kunne se at det var et API-brudd.
+            record_api_error(
+                f"Sykkelpunkt {point_id}: en side feilet etter {len(edges)} døgn; delvis serie vises."
+            )
             break
 
         page_info = by_day.get("pageInfo") or {}
@@ -270,43 +290,6 @@ def fetch_bicycle_year(
     # `to` er eksklusiv i byDay, så vi ber om midnatt dagen etter sluttdatoen.
     to_str = datetime.combine(end + timedelta(days=1), time(0, 0), tzinfo=OSLO_TZ).isoformat()
     return fetch_bicycle_daily_data(point_id, from_str, to_str, timeout_s, use_cache)
-
-
-def fetch_bicycle_years(
-    point_id: str,
-    years: List[int],
-    timeout_s: int,
-    use_cache: bool,
-    today: Optional[date] = None,
-) -> Dict[int, Optional[Dict]]:
-    """Hent flere år for ett punkt, ett år per tråd.
-
-    Årene er uavhengige, så de hentes parallelt — men hvert år pagineres
-    fortsatt sekvensielt inni seg, siden hver markør kommer fra forrige svar.
-    År uten data utelates fra svaret framfor å bli med som None, slik at
-    kallstedet ikke må filtrere.
-    """
-    wanted = sorted({int(y) for y in years})
-    if not point_id or not wanted:
-        return {}
-
-    result: Dict[int, Optional[Dict]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(wanted), MAX_BATCH_WORKERS)) as executor:
-        future_to_year = {
-            executor.submit(fetch_bicycle_year, point_id, y, timeout_s, use_cache, today): y
-            for y in wanted
-        }
-        for future in as_completed(future_to_year):
-            year = future_to_year[future]
-            try:
-                payload = future.result()
-            except (KeyError, TypeError, ValueError) as exc:
-                logger.error("Feil ved henting av sykkeldata for %s, år %s: %s", point_id, year, exc)
-                record_api_error(f"Sykkelpunkt {point_id} feil (år {year}): {exc}")
-                continue
-            if payload is not None:
-                result[year] = payload
-    return dict(sorted(result.items()))
 
 
 def fetch_bicycle_points_years(

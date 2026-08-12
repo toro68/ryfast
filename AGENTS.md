@@ -60,3 +60,4 @@ Notes:
 
 - Ikke sjekk inn generert data, cacher eller virtualenv-kataloger (`.venv/`, `__pycache__/`).
 - Flytting av `@st.cache_data`-funksjoner endrer cachenøkkelen (kald cache ved deploy) — ufarlig, men nevn det i commit-meldingen.
+- Cachede API-funksjoner skal aldri fange feil og returnere `None` inni cachen: `st.cache_data` mellomlagrer returverdier, men ikke unntak, så et forbigående nettverksbrudd ville blitt cachet i `API_CACHE_TTL` (et døgn) og latt punktet stå tomt i appen. La feilen boble ut av den cachede funksjonen og oversett til `None` utenfor (se `fetch_data` i `api.py`).

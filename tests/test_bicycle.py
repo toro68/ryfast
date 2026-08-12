@@ -16,13 +16,13 @@ from ryfast_app.bicycle import (
     comparable_months,
     compare_years_monthly,
     coverage_summary,
+    days_expected_in_year,
     mean_points_daily,
     monthly_profile,
     panel_point_ids,
     parse_daily_volumes,
     restrict_to_common_period,
     restrict_to_comparable_months,
-    retired_point_ids,
     sum_points_daily,
     weekday_profile,
     weekend_vs_weekday,
@@ -30,6 +30,7 @@ from ryfast_app.bicycle import (
     year_to_date_range,
 )
 from ryfast_app.config import BICYCLE_POINTS
+from ryfast_app.vegvesen_api import VegvesenApiError
 from tests.fixtures import bicycle_day, bicycle_payload
 
 
@@ -172,6 +173,37 @@ class TestCoverageSummary:
         out = coverage_summary(pd.DataFrame())
         assert out["days_total"] == 0 and np.isnan(out["mean_coverage_pct"])
 
+    def test_doegn_som_mangler_helt_telles_med(self):
+        # Regresjon fra ekte data: i et aggregat over flere punkter finnes døgn
+        # uten tall ikke som rad, og volume er aldri NaN etter en groupby-sum.
+        # Banneret meldte derfor «alle døgn har god dekning» om de døgnene som
+        # overlevde, mens resten av perioden var borte.
+        payload = bicycle_payload([bicycle_day("2025-06-02", 100, 100.0)])
+        out = coverage_summary(parse_daily_volumes(payload), days_expected=30)
+        assert out["days_total"] == 30
+        assert out["days_reliable"] == 1
+        assert out["days_absent"] == 29
+        assert out["days_missing"] == 29
+
+    def test_uten_days_expected_maales_mot_radene(self):
+        payload = bicycle_payload([bicycle_day("2025-06-02", 100, 100.0)])
+        out = coverage_summary(parse_daily_volumes(payload))
+        assert out["days_total"] == 1 and out["days_absent"] == 0
+
+
+class TestDaysExpectedInYear:
+    def test_tidligere_aar_er_hele_aaret(self):
+        assert days_expected_in_year(2024, today=date(2026, 8, 10)) == 366
+        assert days_expected_in_year(2025, today=date(2026, 8, 10)) == 365
+
+    def test_inneverende_aar_stopper_i_gaar(self):
+        # 1. jan til og med 9. aug = 221 døgn
+        assert days_expected_in_year(2026, today=date(2026, 8, 10)) == 221
+
+    def test_aar_uten_periode_gir_null(self):
+        assert days_expected_in_year(2027, today=date(2026, 8, 10)) == 0
+        assert days_expected_in_year(2026, today=date(2026, 1, 1)) == 0
+
 
 class TestYearToDateRange:
     def test_tidligere_aar_gir_hele_aaret(self):
@@ -193,17 +225,21 @@ class TestYearToDateRange:
         assert year_to_date_range(2026, today=date(2026, 1, 1)) is None
 
 
+def _antall_nedlagte() -> int:
+    return sum(1 for m in BICYCLE_POINTS.values() if not m.get("operational", True))
+
+
 class TestBicyclePointOptions:
     def test_nedlagte_merkes(self):
         options = bicycle_point_options(include_retired=True)
         nedlagte = [label for label in options if "nedlagt" in label]
-        assert len(nedlagte) == len(retired_point_ids())
+        assert len(nedlagte) == _antall_nedlagte()
         assert nedlagte
 
     def test_kan_utelate_nedlagte(self):
         alle = bicycle_point_options(include_retired=True)
         i_drift = bicycle_point_options(include_retired=False)
-        assert len(i_drift) == len(alle) - len(retired_point_ids())
+        assert len(i_drift) == len(alle) - _antall_nedlagte()
         assert not any("nedlagt" in label for label in i_drift)
 
     def test_alle_punkter_har_unik_etikett(self):
@@ -297,6 +333,52 @@ class TestFetchBicycleDailyPagination:
         assert api_mod.fetch_bicycle_daily_data("", "f", "t", 5, False) is None
 
 
+class TestFetchDataCacherIkkeFeil:
+    """Et forbigående nettverksbrudd skal ikke låse punktet ute et helt døgn.
+
+    Regresjon: `st.cache_data` mellomlagrer returverdier, men ikke unntak.
+    Da feilen ble fanget *inne* i den cachede funksjonen og oversatt til None,
+    ble None cachet i API_CACHE_TTL (24 timer) — punktet sto tomt i appen
+    resten av dagen selv om API-et ble friskt igjen.
+    """
+
+    def test_feil_returnerer_none_men_caches_ikke(self, monkeypatch):
+        kall = {"n": 0}
+
+        def _post(query, timeout_s, **kw):
+            kall["n"] += 1
+            if kall["n"] == 1:
+                raise VegvesenApiError("forbigående nettverksfeil")
+            return {"data": {"ok": True}}
+
+        monkeypatch.setattr(api_mod, "post_graphql", _post)
+        query = "query { unik_for_denne_testen }"
+        assert api_mod.fetch_data(query, 5, True) is None
+        # Andre kall skal treffe API-et på nytt, ikke et cachet None
+        assert api_mod.fetch_data(query, 5, True) == {"data": {"ok": True}}
+        assert kall["n"] == 2
+
+    def test_vellykket_svar_caches(self, monkeypatch):
+        kall = {"n": 0}
+
+        def _post(query, timeout_s, **kw):
+            kall["n"] += 1
+            return {"data": {"ok": True}}
+
+        monkeypatch.setattr(api_mod, "post_graphql", _post)
+        query = "query { unik_for_cachetesten }"
+        assert api_mod.fetch_data(query, 5, True) == {"data": {"ok": True}}
+        assert api_mod.fetch_data(query, 5, True) == {"data": {"ok": True}}
+        assert kall["n"] == 1
+
+    def test_uten_cache_returnerer_none_ved_feil(self, monkeypatch):
+        def _post(query, timeout_s, **kw):
+            raise VegvesenApiError("nede")
+
+        monkeypatch.setattr(api_mod, "post_graphql", _post)
+        assert api_mod.fetch_data("query { uten_cache }", 5, False) is None
+
+
 class TestFetchBicycleYear:
     def test_aar_for_datastart_gir_none(self):
         assert api_mod.fetch_bicycle_year("p1", 1990, 5, False) is None
@@ -375,12 +457,31 @@ class TestMeanPointsDaily:
         out = mean_points_daily({"a": a, "b": b})
         assert out["volume"].tolist() == [75.0]
 
-    def test_taaler_manglende_punkt(self):
-        # Snittet skal ikke falle bare fordi ett punkt mangler
+    def test_nivaaet_faller_ikke_naar_et_punkt_mangler(self):
+        # Snittet skal ikke falle bare fordi ett punkt mangler — motsatt av summen
         a = _punkt_df({"2025-06-02": 100, "2025-06-03": 100})
         b = _punkt_df({"2025-06-02": 100})
         out = mean_points_daily({"a": a, "b": b})
         assert out["volume"].tolist() == [100.0, 100.0]
+
+    def test_doegn_under_punktterskel_er_upaalitelig(self):
+        # Regresjon fra ekte data: døgn med 1 av 2 punkter lå 63 % over døgn med
+        # begge, fordi punktene har ulikt volum. Nivåskiftet skal ikke tas med
+        # i snittene som om det var en endring i sykling.
+        a = _punkt_df({"2025-06-02": 100, "2025-06-03": 100})
+        b = _punkt_df({"2025-06-02": 100})
+        out = mean_points_daily({"a": a, "b": b})
+        assert out["reliable"].tolist() == [True, False]
+
+    def test_terskelen_kan_slaas_av(self):
+        a = _punkt_df({"2025-06-02": 100, "2025-06-03": 100})
+        b = _punkt_df({"2025-06-02": 100})
+        out = mean_points_daily({"a": a, "b": b}, min_points_share=0.0)
+        assert out["reliable"].all()
+
+    def test_ett_punkt_er_alltid_paalitelig_nok(self):
+        # Med bare ett punkt valgt finnes ingen punktmiks å korrigere for.
+        out = mean_points_daily({"a": _punkt_df({"2025-06-02": 100})})
         assert out["reliable"].all()
 
 

@@ -55,11 +55,6 @@ def bicycle_point_options(include_retired: bool = True) -> Dict[str, str]:
     return {label: pid for _, _, pid, label in items}
 
 
-def retired_point_ids() -> List[str]:
-    """ID-ene til punkter som er ute av drift."""
-    return [pid for pid, m in BICYCLE_POINTS.items() if not m.get("operational", True)]
-
-
 def parse_daily_volumes(
     api_payload: Optional[Dict],
     min_coverage_pct: float = BICYCLE_MIN_COVERAGE_PCT,
@@ -183,18 +178,36 @@ def weekend_vs_weekday(daily: pd.DataFrame, reliable_only: bool = True) -> Dict[
     }
 
 
-def coverage_summary(daily: pd.DataFrame) -> Dict[str, object]:
-    """Nøkkeltall om datagrunnlaget, til bruk i et dekningsbanner."""
+def coverage_summary(
+    daily: pd.DataFrame, days_expected: Optional[int] = None
+) -> Dict[str, object]:
+    """Nøkkeltall om datagrunnlaget, til bruk i et dekningsbanner.
+
+    `days_expected` er antall døgn perioden *skulle* hatt. Uten det måles
+    dekningen mot radene som finnes, og for et aggregat over flere punkter er
+    det villedende: døgn der ingen punkter har tall finnes ikke som rad, og
+    `volume` er aldri NaN etter en groupby-sum. Banneret ville da meldt «alle
+    døgn har god dekning» om de døgnene som overlevde, mens resten av året var
+    borte. Kallstedet oppgir derfor lengden på perioden.
+    """
+    empty = {
+        "days_total": 0, "days_reliable": 0, "days_missing": 0,
+        "days_absent": int(days_expected or 0), "mean_coverage_pct": np.nan,
+    }
     if daily is None or daily.empty:
-        return {"days_total": 0, "days_reliable": 0, "days_missing": 0, "mean_coverage_pct": np.nan}
-    days_total = int(len(daily))
+        return empty
+    rows = int(len(daily))
+    days_total = int(days_expected) if days_expected else rows
     days_reliable = int(daily["reliable"].sum())
-    days_missing = int(daily["volume"].isna().sum())
+    # Døgn uten tall: både rader med NaN og døgn som mangler helt.
+    days_absent = max(0, days_total - rows)
+    days_missing = int(daily["volume"].isna().sum()) + days_absent
     mean_cov = daily["coverage_pct"].mean()
     return {
         "days_total": days_total,
         "days_reliable": days_reliable,
         "days_missing": days_missing,
+        "days_absent": days_absent,
         "mean_coverage_pct": float(mean_cov) if pd.notna(mean_cov) else np.nan,
     }
 
@@ -252,19 +265,29 @@ def sum_points_daily(frames_by_point: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     return grouped[cols]
 
 
-def mean_points_daily(frames_by_point: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+def mean_points_daily(
+    frames_by_point: Dict[str, pd.DataFrame],
+    min_points_share: float = 0.8,
+) -> pd.DataFrame:
     """Snitt per punkt per døgn, som tåler at et punkt mangler.
 
-    Nivået er robust mot datahull — motsatt av summen — men kan ikke leses som
-    et samlet antall syklister.
+    Snittet er robust mot at summen *faller* ved datahull, men ikke mot at
+    nivået skifter når utvalget endres: punktene har svært ulikt volum, så et
+    døgn målt på de tre travleste punktene ligger høyere enn et døgn målt på
+    alle. I ekte data ga dette 63 % nivåforskjell mellom døgn med ett og to
+    punkter — en «endring» som bare gjenspeilte hvilket punkt som var med.
+
+    Derfor kreves `min_points_share` av punktene til stede før et døgn regnes
+    som pålitelig. Terskelen er lavere enn summens krav om alle punkter: her
+    er poenget å utelukke nivåskift, ikke å unngå at summen faller.
     """
     summed = sum_points_daily(frames_by_point)
     if summed.empty:
         return summed
     out = summed.copy()
     out["volume"] = out["volume"] / out["points_present"]
-    # Snittet er meningsfullt selv når ett punkt mangler.
-    out["reliable"] = out["points_present"] > 0
+    required = float(out["points_expected"].iloc[0]) * float(min_points_share)
+    out["reliable"] = out["points_present"] >= max(1.0, required)
     return out
 
 
@@ -459,3 +482,16 @@ def year_to_date_range(year: int, today: Optional[date] = None) -> tuple:
         if end < start:
             return None
     return start, end
+
+
+def days_expected_in_year(year: int, today: Optional[date] = None) -> int:
+    """Antall døgn året skulle hatt data for, avkortet mot dagens dato.
+
+    Brukes som nevner i dekningsbanneret, slik at døgn som mangler helt —
+    og derfor ikke finnes som rad i et aggregat — også blir talt.
+    """
+    span = year_to_date_range(year, today=today)
+    if span is None:
+        return 0
+    start, end = span
+    return (end - start).days + 1
