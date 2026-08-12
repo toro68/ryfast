@@ -457,7 +457,7 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
 
     municipalities = sorted({str(m.get("municipality", "")) for m in BICYCLE_POINTS.values()})
 
-    with st.sidebar.form("bicycle_controls"):
+    with st.sidebar.container(border=True):
         scope = st.radio(
             "Hvilke punkter?",
             [SCOPE_SELECTED, SCOPE_ALL_OPERATIONAL, SCOPE_ALL, SCOPE_MUNICIPALITY],
@@ -515,10 +515,11 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
                 help="Døgn under terskelen beholder tallet, men utelates fra snittene.",
             )
 
-        submitted = st.form_submit_button(
+        submitted = st.button(
             "🚲 Hent sykkeldata",
             type="primary",
             on_click=_activate_bicycle_tab,
+            key="fetch_bicycle_data",
         )
 
     # Løs opp utvalget til faktiske ID-er
