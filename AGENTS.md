@@ -60,4 +60,5 @@ Notes:
 
 - Ikke sjekk inn generert data, cacher eller virtualenv-kataloger (`.venv/`, `__pycache__/`).
 - Flytting av `@st.cache_data`-funksjoner endrer cachenøkkelen (kald cache ved deploy) — ufarlig, men nevn det i commit-meldingen.
+- API-feilpanelet i sidebaren tegnes til slutt: `main()` holder av plassen med `reserve_api_status_sidebar()` før fanene, og kaller `render_api_status_sidebar(slot)` i en `finally` etter `_render_tabs()`. Flushes bufferet før fanene har kjørt, blir feil fra f.eks. sykkelfanen usynlige til neste rerun — brukeren ser «ingen data» uten å få vite at API-et svarte med feil. Legg derfor ikke API-kall etter det siste flush-kallet.
 - Cachede API-funksjoner skal aldri fange feil og returnere `None` inni cachen: `st.cache_data` mellomlagrer returverdier, men ikke unntak, så et forbigående nettverksbrudd ville blitt cachet i `API_CACHE_TTL` (et døgn) og latt punktet stå tomt i appen. La feilen boble ut av den cachede funksjonen og oversett til `None` utenfor (se `fetch_data` i `api.py`).

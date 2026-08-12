@@ -298,19 +298,24 @@ def fetch_bicycle_points_years(
     timeout_s: int,
     use_cache: bool,
     today: Optional[date] = None,
-) -> Dict[int, Dict[str, Dict]]:
-    """Hent alle kombinasjoner av punkt og år: {år: {punkt_id: payload}}.
+) -> Tuple[Dict[int, Dict[str, Dict]], int]:
+    """Hent alle kombinasjoner av punkt og år: ({år: {punkt_id: payload}}, feil).
 
     Hvert (punkt, år)-par er uavhengig, så alle hentes parallelt. Med «alle
     punkter» over flere år blir det mange kall, derfor et eget, høyere
     trådtak enn batch-henting for bil.
+
+    Andre returverdi er antall (punkt, år)-kall som feilet mot API-et. Uten det
+    kan ikke kallstedet skille «API-et svarte ikke» fra «punktet har ingen
+    registreringer», og en nede-periode ville blitt meldt som manglende data.
     """
     wanted_points = [p for p in dict.fromkeys(point_ids) if p]
     wanted_years = sorted({int(y) for y in years})
     if not wanted_points or not wanted_years:
-        return {}
+        return {}, 0
 
     result: Dict[int, Dict[str, Dict]] = {}
+    failed = 0
     jobs = [(pid, y) for pid in wanted_points for y in wanted_years]
     with ThreadPoolExecutor(max_workers=min(len(jobs), MAX_BICYCLE_WORKERS)) as executor:
         futures = {
@@ -324,7 +329,15 @@ def fetch_bicycle_points_years(
             except (KeyError, TypeError, ValueError) as exc:
                 logger.error("Feil ved henting av sykkeldata for %s, år %s: %s", pid, year, exc)
                 record_api_error(f"Sykkelpunkt {pid} feil (år {year}): {exc}")
+                failed += 1
                 continue
             if payload is not None:
                 result.setdefault(year, {})[pid] = payload
-    return dict(sorted(result.items()))
+            elif year >= BICYCLE_DATA_START_YEAR and (
+                year_to_date_range(year, today=today) is not None
+            ):
+                # None fra et år som *finnes* betyr at kallet feilet — ikke at
+                # punktet mangler registreringer. Uten dette skillet får
+                # brukeren «punktene mangler data» når API-et er nede.
+                failed += 1
+    return dict(sorted(result.items())), failed

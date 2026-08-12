@@ -401,6 +401,44 @@ class TestFetchBicycleYear:
         assert fanget["to"] == "2026-08-10T00:00:00+02:00"  # dagen etter 9. august
 
 
+class TestFetchBicyclePointsYearsFeiltelling:
+    """Antall feilede kall må skilles fra «punktet mangler registreringer»."""
+
+    def _stub(self, monkeypatch, svar):
+        """svar: {(punkt, år): payload eller None}."""
+
+        def _fetch(point_id, year, timeout_s, use_cache, today=None):
+            return svar.get((point_id, year))
+
+        monkeypatch.setattr(api_mod, "fetch_bicycle_year", _fetch)
+
+    def test_none_for_eksisterende_aar_telles_som_feil(self, monkeypatch):
+        self._stub(monkeypatch, {("p1", 2025): None, ("p2", 2025): bicycle_payload([])})
+        raw, feilet = api_mod.fetch_bicycle_points_years(
+            ["p1", "p2"], [2025], 5, False, today=date(2026, 8, 10)
+        )
+        assert feilet == 1
+        assert list(raw[2025]) == ["p2"]
+
+    def test_aar_uten_data_teller_ikke_som_feil(self, monkeypatch):
+        # 2027 finnes ikke ennå: None derfra er ikke et API-brudd.
+        self._stub(monkeypatch, {})
+        raw, feilet = api_mod.fetch_bicycle_points_years(
+            ["p1"], [2027], 5, False, today=date(2026, 8, 10)
+        )
+        assert (raw, feilet) == ({}, 0)
+
+    def test_alle_kall_feilet_gir_full_telling(self, monkeypatch):
+        self._stub(monkeypatch, {})
+        raw, feilet = api_mod.fetch_bicycle_points_years(
+            ["p1", "p2"], [2024, 2025], 5, False, today=date(2026, 8, 10)
+        )
+        assert (raw, feilet) == ({}, 4)
+
+    def test_tomt_utvalg_gir_null_feil(self):
+        assert api_mod.fetch_bicycle_points_years([], [2025], 5, False) == ({}, 0)
+
+
 def _punkt_df(dager, coverage=100.0, min_cov=50.0):
     """Døgn-df for ett punkt fra {dato: volum}."""
     return parse_daily_volumes(

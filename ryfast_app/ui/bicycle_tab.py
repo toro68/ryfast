@@ -580,7 +580,7 @@ def render_bicycle_tab() -> None:
             with st.spinner(
                 f"Henter døgndata for {len(point_ids)} punkt(er) × {len(years)} år …"
             ):
-                raw = fetch_bicycle_points_years(
+                raw, failed_calls = fetch_bicycle_points_years(
                     point_ids,
                     years,
                     timeout_s=int(st.session_state.get("timeout_s", 60)),
@@ -602,6 +602,8 @@ def render_bicycle_tab() -> None:
                 "aggregation": settings["aggregation"],
                 "scope": settings["scope"],
                 "min_coverage": min_cov,
+                "failed_calls": int(failed_calls),
+                "expected_calls": len(point_ids) * len(years),
             }
 
     result = st.session_state.get("bicycle_result")
@@ -613,13 +615,34 @@ def render_bicycle_tab() -> None:
     point_ids: List[str] = result["point_ids"]
     aggregation: str = result["aggregation"]
     label = _selection_label(point_ids, result["scope"], aggregation)
+    failed_calls = int(result.get("failed_calls") or 0)
+    expected_calls = int(result.get("expected_calls") or 0)
 
     if not parsed:
-        st.error(
-            "❌ Ingen sykkeldata for utvalget. Punktene kan mangle registreringer "
-            "for de valgte årene."
-        )
+        # Skill API-feil fra manglende registreringer: symptomet er det samme
+        # (ingen tall), men det brukeren skal gjøre er stikk motsatt.
+        if failed_calls:
+            st.error(
+                f"❌ Klarte ikke hente sykkeldata: {failed_calls} av {expected_calls} "
+                "API-kall feilet. Dette er et problem med tilkoblingen til Statens "
+                "vegvesen, ikke med punktene — prøv igjen, eller se «🧾 API-feil / "
+                "status» i sidebaren for detaljer."
+            )
+        else:
+            st.error(
+                "❌ Ingen sykkeldata for utvalget. Punktene kan mangle registreringer "
+                "for de valgte årene."
+            )
         return
+
+    # Delvis feil: vi har tall, men ikke alle. Uten dette varselet ser et
+    # datahull fra en nede-periode ut som nedgang i sykling.
+    if failed_calls:
+        st.warning(
+            f"⚠️ {failed_calls} av {expected_calls} API-kall feilet, så noen punkter "
+            "eller år mangler helt. Tallene under bygger bare på det som kom gjennom — "
+            "prøv igjen for et komplett grunnlag."
+        )
 
     retired_valgt = [
         str(BICYCLE_POINTS[p]["name"])

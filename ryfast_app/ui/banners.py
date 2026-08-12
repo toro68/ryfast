@@ -1,11 +1,12 @@
 """Bannere og sidebar-status for datadekning, anomalier og API-feil."""
 
 import logging
-from typing import List
+from typing import List, Optional
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit.delta_generator import DeltaGenerator
 
 from ryfast_app.api import clear_api_errors, flush_api_error_buffer_to_session_state
 from ryfast_app.config import ANOMALY_THRESHOLD_PCT, FULL_COVERAGE_TOL_PCT, MONTH_NAMES
@@ -14,10 +15,24 @@ from ryfast_app.processing import detect_monthly_anomalies
 logger = logging.getLogger(__name__)
 
 
-def render_api_status_sidebar() -> None:
+def reserve_api_status_sidebar() -> DeltaGenerator:
+    """Hold av plassen i sidebaren, men fyll den først til slutt.
+
+    Feil fra faner som hentes lenger ned i `main()` — sykkelfanen særlig — blir
+    registrert *etter* at sidebaren er tegnet. Tegnet vi statusen med én gang,
+    ville de feilene ligget uflushet i bufferet og vært usynlige til neste
+    rerun: brukeren ser «ingen data» uten å få vite at API-et svarte med feil.
+    Plassholderen lar oss beholde plasseringen i sidebaren og likevel flushe
+    etter at alt innhold er kjørt.
+    """
+    return st.sidebar.empty()
+
+
+def render_api_status_sidebar(slot: Optional[DeltaGenerator] = None) -> None:
     flush_api_error_buffer_to_session_state()
     errors = st.session_state.get("api_errors", []) or []
-    with st.sidebar.expander("🧾 API-feil / status", expanded=False):
+    container = slot.container() if slot is not None else st.sidebar.container()
+    with container.expander("🧾 API-feil / status", expanded=False):
         if not errors:
             st.caption("Ingen registrerte API-feil i denne sesjonen.")
             return
