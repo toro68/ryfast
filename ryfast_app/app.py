@@ -248,9 +248,11 @@ def _render_tabs() -> None:
     Egen funksjon slik at `main()` kan flushe API-feil til sidebaren *etter*
     at fanene er kjørt, uten at en tidlig `return` her hopper over flushen.
     """
-    tabs = st.tabs(
-        ["📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport", "🚲 Sykkel"]
-    )
+    tab_labels = [
+        "📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport", "🚲 Sykkel"
+    ]
+    default_tab = "🚲 Sykkel" if st.session_state.pop("bicycle_tab_requested", False) else None
+    tabs = st.tabs(tab_labels, default=default_tab)
     tab1, tab2, tab3, tab4, tab5, tab6 = tabs
 
     # Sykkelfanen har eget punkt- og årsvalg, så den ligger utenfor sjekken på

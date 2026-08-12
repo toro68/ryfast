@@ -68,6 +68,10 @@ AGG_SUM = "Sum (samlet antall)"
 AGG_MEAN = "Snitt per punkt"
 
 
+def _activate_bicycle_tab() -> None:
+    st.session_state.bicycle_tab_requested = True
+
+
 def _available_years(today: Optional[date] = None) -> List[int]:
     """År det finnes sykkeldata for, nyeste først."""
     today = today or date.today()
@@ -511,7 +515,11 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
                 help="Døgn under terskelen beholder tallet, men utelates fra snittene.",
             )
 
-        submitted = st.form_submit_button("🚲 Hent sykkeldata", type="primary")
+        submitted = st.form_submit_button(
+            "🚲 Hent sykkeldata",
+            type="primary",
+            on_click=_activate_bicycle_tab,
+        )
 
     # Løs opp utvalget til faktiske ID-er
     if scope == SCOPE_ALL:
