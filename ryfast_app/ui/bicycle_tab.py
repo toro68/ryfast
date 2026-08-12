@@ -499,7 +499,7 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
             ),
         )
 
-        with st.expander("🔧 Avansert"):
+        with st.expander("🔧 Avansert", expanded=True):
             include_retired = st.checkbox(
                 "Ta med nedlagte punkter i «alle»",
                 value=False,
