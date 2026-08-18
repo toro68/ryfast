@@ -33,7 +33,6 @@ from ryfast_app.bicycle import (
     WEEKDAY_NAMES,
     bicycle_point_options,
     comparable_months,
-    compare_years_monthly,
     coverage_summary,
     days_expected_in_year,
     mean_points_daily,
@@ -41,14 +40,16 @@ from ryfast_app.bicycle import (
     panel_point_ids,
     parse_daily_volumes,
     restrict_to_common_period,
+    restrict_to_common_period_from,
+    restrict_to_common_calendar_days,
     restrict_to_comparable_months,
     sum_points_daily,
     weekday_profile,
-    weekend_vs_weekday,
     year_comparison_summary,
 )
 from ryfast_app.config import (
     BICYCLE_DATA_START_YEAR,
+    BICYCLE_DEFAULT_OPENING_DATE,
     BICYCLE_DEFAULT_POINT_ID,
     BICYCLE_MIN_COVERAGE_PCT,
     BICYCLE_POINTS,
@@ -204,16 +205,19 @@ def _render_season_chart(daily: pd.DataFrame) -> None:
 
 def _render_metrics(daily: pd.DataFrame, aggregation: str = AGG_SUM) -> None:
     reliable = daily[daily["reliable"]].dropna(subset=["volume"])
-    split = weekend_vs_weekday(daily)
     er_snitt = aggregation == AGG_MEAN and "points_present" in daily.columns
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        snitt = reliable["volume"].mean() if not reliable.empty else None
-        st.metric(
-            "Snitt per døgn per punkt" if er_snitt else "Snitt per døgn",
-            format_number(snitt) if snitt is not None else "N/A",
-        )
+        if reliable.empty:
+            st.metric("Siste registrerte døgn", "N/A")
+        else:
+            latest = reliable.sort_values("date").iloc[-1]
+            st.metric(
+                "Siste døgn per punkt" if er_snitt else "Siste registrerte døgn",
+                format_number(latest["volume"]),
+                help=f"{latest['weekday_name']} {latest['date']:%d.%m.%Y}",
+            )
     with c2:
         if reliable.empty:
             st.metric("Travleste døgn", "N/A")
@@ -226,42 +230,24 @@ def _render_metrics(daily: pd.DataFrame, aggregation: str = AGG_SUM) -> None:
             st.metric("Travleste døgn", format_number(top["volume"]), help=hjelp)
     with c3:
         st.metric(
-            "Hverdag vs helg",
-            f"{split['weekend_share_pct']:.0f} %" if split["weekend_share_pct"] is not None else "N/A",
-            help=(
-                "Helgesnittet som andel av hverdagssnittet. Lav andel tyder på "
-                "arbeidsreiser, høy andel på tur- og fritidssykling."
-            ),
+            "Døgn med god dekning",
+            format_number(len(reliable)),
+            help="Antall døgn som inngår i visningen og sammenligningene.",
         )
-    with c4:
-        total = reliable["volume"].sum() if not reliable.empty else 0
-        if er_snitt:
-            # En sum av per-punkt-snitt er ikke passeringer: i ekte data ga den
-            # 41 252 der de samme døgnene hadde 53 796 faktiske passeringer.
-            st.metric(
-                "Snitt per punkt, sum av døgn",
-                format_number(total),
-                help=(
-                    "Summen av døgnsnittene, ikke antall passeringer — velg "
-                    "«Sum (samlet antall)» for et passeringstall."
-                ),
-            )
-        else:
-            st.metric(
-                "Sum passeringer",
-                format_number(total),
-                help="Sum over døgn med god dekning; ikke et fullstendig årstall når døgn mangler.",
-            )
-
-
-def _render_year_comparison(frames: Dict[int, pd.DataFrame]) -> None:
+def _render_year_comparison(
+    frames: Dict[int, pd.DataFrame], opening_date: Optional[date] = None
+) -> None:
     """Sammenlign år på lik periode og like måneder.
 
     To korreksjoner, som begge er nødvendige for at prosenttallet skal bety
     noe: inneværende år er avkortet mot dagens dato, og dekningen varierer
     mellom år slik at et år kan mangle hele vinteren.
     """
-    common = restrict_to_common_period(frames)
+    common = (
+        restrict_to_common_period_from(frames, (opening_date.month, opening_date.day))
+        if opening_date is not None
+        else restrict_to_common_period(frames)
+    )
     if len(common) < 2:
         st.info("Velg minst to år med data for å sammenligne.")
         return
@@ -287,15 +273,23 @@ def _render_year_comparison(frames: Dict[int, pd.DataFrame]) -> None:
         comparable = common
         months = []
 
+    comparable = restrict_to_common_calendar_days(comparable)
+
     summary = year_comparison_summary(comparable)
     if summary.empty:
         st.info("Ingen døgn med god nok dekning i de valgte årene.")
         return
 
-    note = (
-        "Sammenligningen bruker samme del av kalenderåret for alle år, siden "
-        "inneværende år ikke er ferdig." + cutoff_note
-    )
+    if opening_date is not None:
+        note = (
+            f"Sammenligningen starter {opening_date:%d.%m} i hvert år, fordi "
+            f"Sykkelstamvegen åpnet {opening_date:%d.%m.%Y}." + cutoff_note
+        )
+    else:
+        note = (
+            "Sammenligningen bruker samme del av kalenderåret for alle år, siden "
+            "inneværende år ikke er ferdig." + cutoff_note
+        )
     if months and len(months) < 12:
         navn = ", ".join(MONTH_NAMES[m - 1] for m in months)
         note += (
@@ -305,40 +299,48 @@ def _render_year_comparison(frames: Dict[int, pd.DataFrame]) -> None:
     st.caption(note)
 
     baseline_year = int(summary.iloc[0]["year"])
+    baseline_total = float(summary.iloc[0]["total_volume"])
     cols = st.columns(len(summary))
     for col, (_, row) in zip(cols, summary.iterrows()):
         with col:
-            change = row["change_pct"]
+            total = float(row["total_volume"])
+            change = None
+            if int(row["year"]) != baseline_year and baseline_total:
+                change = (total - baseline_total) / baseline_total * 100.0
             st.metric(
                 f"{int(row['year'])}",
-                format_number(row["mean_volume"]),
-                delta=None if change is None or pd.isna(change) else f"{float(change):+.1f} %",
+                f"{format_number(total)} passeringer",
+                delta=None if change is None else f"{change:+.1f} %",
                 help=(
-                    f"Snitt per døgn over {int(row['days'])} døgn med god dekning."
+                    f"Registrerte passeringer over {int(row['days'])} identiske kalenderdøgn."
                     + ("" if int(row["year"]) == baseline_year else f" Endring målt mot {baseline_year}.")
                 ),
             )
 
-    # Grafen viser alle måneder, ikke bare de felles: da ser man selv hvilke
-    # måneder som mangler i hvilke år.
-    monthly = compare_years_monthly(common)
-    if not monthly.empty:
-        plot_df = monthly.copy()
-        plot_df["Måned"] = plot_df["month"].map(lambda m: MONTH_NAMES[int(m) - 1])
-        plot_df["År"] = plot_df["year"].astype(str)
+    # Rå døgntall, lagt på samme kalenderakse slik at år kan leses direkte mot
+    # hverandre uten at et månedssnitt skjuler variasjonen.
+    daily_rows = []
+    for year, daily in comparable.items():
+        part = daily.copy()
+        dates = pd.to_datetime(part["date"])
+        part["Sammenligningsdato"] = pd.to_datetime(
+            {"year": 2000, "month": dates.dt.month, "day": dates.dt.day}
+        )
+        part["År"] = str(year)
+        daily_rows.append(part)
+    if daily_rows:
+        plot_df = pd.concat(daily_rows, ignore_index=True)
         chart = (
             alt.Chart(plot_df)
-            .mark_bar()
+            .mark_line(point=alt.OverlayMarkDef(size=24), strokeWidth=1.5)
             .encode(
-                x=alt.X("Måned:N", sort=MONTH_NAMES, title="Måned"),
-                xOffset=alt.XOffset("År:N"),
-                y=alt.Y("mean_volume:Q", title="Snitt per døgn"),
+                x=alt.X("Sammenligningsdato:T", title="Dato", axis=alt.Axis(format="%d.%m")),
+                y=alt.Y("volume:Q", title="Registrerte passeringer per døgn"),
                 color=alt.Color("År:N", legend=alt.Legend(title="År", orient="top")),
                 tooltip=[
                     alt.Tooltip("År:N"),
-                    alt.Tooltip("Måned:N"),
-                    alt.Tooltip("mean_volume:Q", format=",.0f", title="Snitt"),
-                    alt.Tooltip("days:Q", title="Antall døgn"),
+                    alt.Tooltip("date:T", title="Dato"),
+                    alt.Tooltip("volume:Q", format=",.0f", title="Passeringer"),
                 ],
             )
             .properties(height=320)
@@ -346,14 +348,15 @@ def _render_year_comparison(frames: Dict[int, pd.DataFrame]) -> None:
         st.altair_chart(chart, width="stretch")
 
     view = summary.copy()
-    view["Snitt per døgn"] = view["mean_volume"].map(format_number)
-    view["Sum passeringer"] = view["total_volume"].map(format_number)
-    view["Endring"] = view["change_pct"].map(
-        lambda v: "referanse" if v is None or pd.isna(v) else f"{float(v):+.1f} %"
+    view["Registrerte passeringer"] = view["total_volume"].map(format_number)
+    view["Endring"] = view["total_volume"].map(
+        lambda total: "referanse"
+        if not baseline_total or float(total) == baseline_total
+        else f"{(float(total) - baseline_total) / baseline_total * 100.0:+.1f} %"
     )
     view = view.rename(columns={"year": "År", "days": "Døgn med god dekning"})
     st.dataframe(
-        view[["År", "Snitt per døgn", "Sum passeringer", "Døgn med god dekning", "Endring"]],
+        view[["År", "Registrerte passeringer", "Døgn med god dekning", "Endring"]],
         width="stretch",
         hide_index=True,
     )
@@ -729,9 +732,25 @@ def render_bicycle_tab() -> None:
     years_with_data = sorted(frames)
     st.markdown(f"**{label} — {', '.join(str(y) for y in years_with_data)}**")
 
+    opening_date = (
+        BICYCLE_DEFAULT_OPENING_DATE
+        if len(effective_points) == 1 and effective_points[0] == BICYCLE_DEFAULT_POINT_ID
+        else None
+    )
+    if opening_date is not None:
+        st.info(
+            f"Sykkelstamvegen åpnet {opening_date:%d.%m.%Y}. Utviklingen under "
+            "sammenligner samme kalenderperiode fra 16. juni i hvert år, slik at "
+            "tall før åpningen ikke blandes inn i referansen."
+        )
+
     if len(years_with_data) > 1:
-        st.markdown("### 📅 Sammenligning mellom år")
-        _render_year_comparison(frames)
+        st.markdown(
+            "### 📅 Utvikling etter åpningen"
+            if opening_date is not None
+            else "### 📅 Sammenligning mellom år"
+        )
+        _render_year_comparison(frames, opening_date=opening_date)
         st.markdown("---")
 
     # Detaljvisningen gjelder det nyeste året

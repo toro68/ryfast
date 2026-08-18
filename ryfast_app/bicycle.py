@@ -371,6 +371,26 @@ def restrict_to_common_period(frames: Dict[int, pd.DataFrame]) -> Dict[int, pd.D
     return out
 
 
+def restrict_to_common_period_from(
+    frames: Dict[int, pd.DataFrame], start_month_day: tuple[int, int]
+) -> Dict[int, pd.DataFrame]:
+    """Sammenlign samme kalenderperiode fra en gitt måned og dag.
+
+    Brukes for tiltak som åpner midt i året: referanseåret skal ikke få med
+    døgn før åpningen, og senere år må starte på samme kalenderdato for at
+    sesong og antall døgn skal være sammenlignbare.
+    """
+    common = restrict_to_common_period(frames)
+    out = {}
+    for year, daily in common.items():
+        dates = pd.to_datetime(daily["date"])
+        mask = [(m, d) >= start_month_day for m, d in zip(dates.dt.month, dates.dt.day)]
+        filtered = daily[pd.Series(mask, index=daily.index)].copy()
+        if not filtered.empty:
+            out[year] = filtered
+    return out
+
+
 def comparable_months(frames: Dict[int, pd.DataFrame], reliable_only: bool = True) -> List[int]:
     """Måneder der *alle* årene har pålitelige døgn.
 
@@ -406,6 +426,43 @@ def restrict_to_comparable_months(
         for year, daily in frames.items()
         if daily is not None and not daily.empty
     }
+
+
+def restrict_to_common_calendar_days(
+    frames: Dict[int, pd.DataFrame], reliable_only: bool = True
+) -> Dict[int, pd.DataFrame]:
+    """Behold bare kalenderdøgn med tall i alle år.
+
+    Reelle summer kan bare sammenlignes når de bygger på nøyaktig de samme
+    måned/dag-kombinasjonene. Ellers vil et manglende døgn se ut som lavere
+    trafikk. Med `reliable_only` beholdes bare døgn med god dekning og volum.
+    """
+    usable = {}
+    day_sets = []
+    for year, daily in sorted(frames.items()):
+        if daily is None or daily.empty:
+            continue
+        src = daily
+        if reliable_only:
+            src = src[src["reliable"] & src["volume"].notna()]
+        if src.empty:
+            continue
+        dates = pd.to_datetime(src["date"])
+        calendar_days = set(zip(dates.dt.month, dates.dt.day))
+        usable[year] = src
+        day_sets.append(calendar_days)
+    if not day_sets:
+        return {}
+
+    common_days = set.intersection(*day_sets)
+    out = {}
+    for year, daily in usable.items():
+        dates = pd.to_datetime(daily["date"])
+        mask = [(m, d) in common_days for m, d in zip(dates.dt.month, dates.dt.day)]
+        filtered = daily[pd.Series(mask, index=daily.index)].copy()
+        if not filtered.empty:
+            out[year] = filtered
+    return out
 
 
 def compare_years_monthly(frames: Dict[int, pd.DataFrame], reliable_only: bool = True) -> pd.DataFrame:

@@ -22,6 +22,8 @@ from ryfast_app.bicycle import (
     panel_point_ids,
     parse_daily_volumes,
     restrict_to_common_period,
+    restrict_to_common_period_from,
+    restrict_to_common_calendar_days,
     restrict_to_comparable_months,
     sum_points_daily,
     weekday_profile,
@@ -598,6 +600,19 @@ class TestCommonPeriod:
         assert common_period_cutoff({}) is None
         assert restrict_to_common_period({}) == {}
 
+    def test_kan_starte_sammenligning_paa_aapningsdato(self):
+        aapningsaar = _punkt_df(
+            {"2025-06-15": 50, "2025-06-16": 100, "2025-06-17": 110}
+        )
+        neste_aar = _punkt_df(
+            {"2026-06-15": 60, "2026-06-16": 120, "2026-06-17": 130}
+        )
+        out = restrict_to_common_period_from(
+            {2025: aapningsaar, 2026: neste_aar}, (6, 16)
+        )
+        assert out[2025]["date"].tolist() == [date(2025, 6, 16), date(2025, 6, 17)]
+        assert out[2026]["date"].tolist() == [date(2026, 6, 16), date(2026, 6, 17)]
+
 
 class TestYearComparisonSummary:
     def test_endring_mot_eldste_aar(self):
@@ -673,3 +688,28 @@ class TestComparableMonths:
         filtrert = restrict_to_comparable_months({2024: i_fjor, 2025: i_aar})
         out = year_comparison_summary(filtrert)
         assert out.iloc[1]["change_pct"] == pytest.approx(0.0)  # ingen reell endring
+
+
+class TestCommonCalendarDays:
+    def test_summer_bruker_identiske_datoer(self):
+        i_fjor = _punkt_df(
+            {"2025-06-16": 100, "2025-06-17": 200, "2025-06-18": 300}
+        )
+        i_aar = _punkt_df({"2026-06-16": 150, "2026-06-18": 350})
+        out = restrict_to_common_calendar_days({2025: i_fjor, 2026: i_aar})
+        assert out[2025]["volume"].tolist() == [100.0, 300.0]
+        assert out[2026]["volume"].tolist() == [150.0, 350.0]
+
+    def test_lav_dekning_utelates_fra_alle_aar(self):
+        i_fjor = _punkt_df({"2025-06-16": 100, "2025-06-17": 200})
+        i_aar = parse_daily_volumes(
+            bicycle_payload(
+                [
+                    bicycle_day("2026-06-16", 150, 100.0),
+                    bicycle_day("2026-06-17", 250, 5.0),
+                ]
+            )
+        )
+        out = restrict_to_common_calendar_days({2025: i_fjor, 2026: i_aar})
+        assert out[2025]["date"].tolist() == [date(2025, 6, 16)]
+        assert out[2026]["date"].tolist() == [date(2026, 6, 16)]
