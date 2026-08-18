@@ -29,7 +29,7 @@ from ryfast_app.bicycle import (
     year_comparison_summary,
     year_to_date_range,
 )
-from ryfast_app.config import BICYCLE_POINTS
+from ryfast_app.config import BICYCLE_DEFAULT_POINT_ID, BICYCLE_POINTS
 from ryfast_app.vegvesen_api import VegvesenApiError
 from tests.fixtures import bicycle_day, bicycle_payload
 
@@ -230,6 +230,11 @@ def _antall_nedlagte() -> int:
 
 
 class TestBicyclePointOptions:
+    def test_standardpunkt_er_sykkelstamvegen_i_drift(self):
+        meta = BICYCLE_POINTS[BICYCLE_DEFAULT_POINT_ID]
+        assert str(meta["name"]).startswith("Sykkelstamvegen")
+        assert meta.get("operational", True)
+
     def test_nedlagte_merkes(self):
         options = bicycle_point_options(include_retired=True)
         nedlagte = [label for label in options if "nedlagt" in label]

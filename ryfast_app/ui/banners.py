@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def reserve_api_status_sidebar() -> DeltaGenerator:
     """Hold av plassen i sidebaren, men fyll den først til slutt.
 
-    Feil fra faner som hentes lenger ned i `main()` — sykkelfanen særlig — blir
+    Feil fra faner eller sider som hentes senere i kjøringen blir
     registrert *etter* at sidebaren er tegnet. Tegnet vi statusen med én gang,
     ville de feilene ligget uflushet i bufferet og vært usynlige til neste
     rerun: brukeren ser «ingen data» uten å få vite at API-et svarte med feil.

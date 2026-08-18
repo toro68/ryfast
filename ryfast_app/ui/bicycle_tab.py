@@ -1,7 +1,7 @@
-"""Sykkelfane: døgnvolum for sykkelregistreringspunkter på Nord-Jæren.
+"""Sykkelside: døgnvolum for sykkelregistreringspunkter på Nord-Jæren.
 
-Fanen har egne innstillinger i sidebaren (punkter, år, aggregering) og henter
-data på klikk, uavhengig av bilanalysen i de andre fanene.
+Siden har egne innstillinger i sidebaren (punkter, år, aggregering) og henter
+data på klikk, uavhengig av Ryfast-analysen.
 
 Døgn er hovedvisningen fordi sykling er værstyrt og har markert ukesrytme; et
 månedssnitt skjuler nettopp det som er interessant.
@@ -49,6 +49,7 @@ from ryfast_app.bicycle import (
 )
 from ryfast_app.config import (
     BICYCLE_DATA_START_YEAR,
+    BICYCLE_DEFAULT_POINT_ID,
     BICYCLE_MIN_COVERAGE_PCT,
     BICYCLE_POINTS,
     MONTH_NAMES,
@@ -66,10 +67,6 @@ SCOPE_MUNICIPALITY = "Alle i én kommune"
 # Hvordan flere punkter slås sammen
 AGG_SUM = "Sum (samlet antall)"
 AGG_MEAN = "Snitt per punkt"
-
-
-def _activate_bicycle_tab() -> None:
-    st.session_state.bicycle_tab_requested = True
 
 
 def _available_years(today: Optional[date] = None) -> List[int]:
@@ -454,6 +451,11 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
     options = bicycle_point_options(include_retired=True)
     retired_labels = [lab for lab in options if "nedlagt" in lab]
     operational_labels = [lab for lab in options if "nedlagt" not in lab]
+    default_labels = [
+        label for label, point_id in options.items() if point_id == BICYCLE_DEFAULT_POINT_ID
+    ]
+    if not default_labels:
+        default_labels = operational_labels[:1]
 
     municipalities = sorted({str(m.get("municipality", "")) for m in BICYCLE_POINTS.values()})
 
@@ -475,7 +477,7 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
         chosen_labels = st.multiselect(
             "Velg sykkelpunkt",
             list(options.keys()),
-            default=operational_labels[:1],
+            default=default_labels,
             key="bicycle_points",
             disabled=scope != SCOPE_SELECTED,
             help="Punkter merket «nedlagt» har historikk, men gir ingen nye tall.",
@@ -518,7 +520,6 @@ def _render_bicycle_sidebar() -> Dict[str, object]:
         submitted = st.button(
             "🚲 Hent sykkeldata",
             type="primary",
-            on_click=_activate_bicycle_tab,
             key="fetch_bicycle_data",
         )
 
@@ -565,8 +566,8 @@ def _selection_label(point_ids: List[str], scope: str, aggregation: str) -> str:
 
 
 def render_bicycle_tab() -> None:
-    """Sykkelfanen: flere punkter, flere år, innstillinger i sidebaren."""
-    st.subheader("🚲 Sykkeltrafikk på Nord-Jæren")
+    """Sykkelsiden: flere punkter, flere år og innstillinger i sidebaren."""
+    st.subheader("Utforsk sykkeltellingene")
     st.caption(
         "Døgntall fra Statens vegvesens sykkelregistreringspunkter. Døgn er "
         "hovedvisningen fordi sykling er værstyrt og varierer kraftig gjennom uka."

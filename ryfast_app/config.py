@@ -342,6 +342,10 @@ BICYCLE_POINTS: Dict[str, Dict[str, object]] = {
     },
 }
 
+# Et sentralt og gjenkjennelig startpunkt på sykkelsiden. Standardvalget skal
+# ikke avhenge av alfabetisk sortering av kommune og punktnavn.
+BICYCLE_DEFAULT_POINT_ID = "99274B3204701"
+
 # Sykkeltellinger er små tall med kraftig ukesrytme, så døgnoppløsning er
 # hovedvisningen. Terskelen brukes til å gråne ut dager med for lav dekning.
 BICYCLE_MIN_COVERAGE_PCT = 50.0

@@ -1,4 +1,4 @@
-"""Streamlit app for fetching, comparing, and exporting Ryfast traffic data."""
+"""Streamlit app for Ryfast traffic analysis and bicycle traffic data."""
 
 import logging
 from typing import List
@@ -54,7 +54,29 @@ def init_session_state():
 def main():
     init_session_state()
 
-    st.set_page_config(page_title="Trafikkdata Visualisering - Ryfast", page_icon="🚗", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(
+        page_title="Trafikkdata – Ryfast og sykkel",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    navigation = st.navigation(
+        [
+            st.Page(_render_ryfast_page, title="Ryfast", icon="🚗", url_path="ryfast", default=True),
+            st.Page(
+                _render_bicycle_page,
+                title="Sykkeltrafikk",
+                icon="🚲",
+                url_path="sykkel",
+            ),
+        ],
+        position="sidebar",
+        expanded=True,
+    )
+    navigation.run()
+
+
+def _render_page_header(title: str, subtitle: str) -> None:
     st.markdown(
         """
     <style>
@@ -65,13 +87,20 @@ def main():
         unsafe_allow_html=True,
     )
     st.markdown(
-        """
+        f"""
     <div class="main-header">
-        <h1>🚗 Trafikkdata Visualisering - Ryfast</h1>
-        <p>Analyse av trafikkmønstre for Ryfylketunnelen, Hundvågtunnelen og Bybrua</p>
+        <h1>{title}</h1>
+        <p>{subtitle}</p>
     </div>
     """,
         unsafe_allow_html=True,
+    )
+
+
+def _render_ryfast_page() -> None:
+    _render_page_header(
+        "🚗 Trafikkdata – Ryfast",
+        "Analyse av trafikkmønstre for Ryfylketunnelen, Hundvågtunnelen og Bybrua",
     )
 
     st.sidebar.header("⚙️ Innstillinger")
@@ -235,30 +264,36 @@ def main():
                 }
 
     try:
-        _render_tabs()
+        _render_ryfast_tabs()
     finally:
         # Til slutt, uansett utfall: fanene over rekker å registrere API-feil
         # etter at sidebaren er tegnet, og de skal med i samme rerun.
         render_api_status_sidebar(api_status_slot)
 
 
-def _render_tabs() -> None:
-    """Tegn de seks fanene. Alt de trenger ligger i `st.session_state`.
+def _render_bicycle_page() -> None:
+    """Egen side for sykkeltrafikk på Nord-Jæren."""
+    _render_page_header(
+        "🚲 Sykkeltrafikk – Nord-Jæren",
+        "Døgndata fra Statens vegvesens sykkelregistreringspunkter",
+    )
+    api_status_slot = reserve_api_status_sidebar()
+    try:
+        render_bicycle_tab()
+    finally:
+        render_api_status_sidebar(api_status_slot)
 
-    Egen funksjon slik at `main()` kan flushe API-feil til sidebaren *etter*
+
+def _render_ryfast_tabs() -> None:
+    """Tegn de fem Ryfast-fanene. Alt de trenger ligger i `st.session_state`.
+
+    Egen funksjon slik at siden kan flushe API-feil til sidebaren *etter*
     at fanene er kjørt, uten at en tidlig `return` her hopper over flushen.
     """
     tab_labels = [
-        "📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport", "🚲 Sykkel"
+        "📈 Visualisering", "📊 Data", "🧮 Totaltall", "🛡️ Datakvalitet", "📄 Rapport"
     ]
-    default_tab = "🚲 Sykkel" if st.session_state.pop("bicycle_tab_requested", False) else None
-    tabs = st.tabs(tab_labels, default=default_tab)
-    tab1, tab2, tab3, tab4, tab5, tab6 = tabs
-
-    # Sykkelfanen har eget punkt- og årsvalg, så den ligger utenfor sjekken på
-    # fullført bilanalyse: den skal virke også før «Analyser data» er trykket.
-    with tab6:
-        render_bicycle_tab()
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_labels)
 
     if not st.session_state.last_result:
         with tab1:
