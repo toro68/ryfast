@@ -10,7 +10,7 @@ et_xmlfile==2.0.0
 fonttools==4.63.0
 fpdf2==2.7.9
 gitdb==4.0.12
-GitPython==3.1.58
+GitPython==3.1.62
 idna==3.18
 Jinja2==3.1.6
 jsonschema-specifications==2025.9.1
