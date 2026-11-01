@@ -117,6 +117,8 @@ def build_pdf_report(
             f"Estimer manglende punkt: {'Ja' if estimate_missing_points else 'Nei'}\n"
             f"Punkt-IDer: {', '.join(point_ids)}"
         ),
+        new_x=XPos.LMARGIN,
+        new_y=YPos.NEXT,
     )
 
     # Year summary (derived from df; no extra API calls)
@@ -352,7 +354,7 @@ def build_pdf_report(
                 _pdf_line(pdf, "Data Quality Warnings", height=8)
                 pdf.set_font("Helvetica", "", 10)
                 for w in warnings[:15]:
-                    pdf.multi_cell(0, 5, pdf_safe_text(f"- {w}"))
+                    pdf.multi_cell(0, 5, pdf_safe_text(f"- {w}"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         except Exception as exc:
             logger.warning("PDF: feil ved generering av varselseksjon: %s", exc)
 

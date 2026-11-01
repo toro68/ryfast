@@ -101,6 +101,29 @@ class TestBuildPdfReport:
         assert isinstance(data, (bytes, bytearray))
         assert bytes(data).startswith(b"%PDF")
 
+    def test_varselseksjon_feiler_ikke(self, comparison_df, _uten_api, caplog):
+        # Regresjon: multi_cell() uten new_x=LMARGIN lot markøren stå ved
+        # høyre marg, så varsellinje nummer to fikk ingen plass og
+        # varselseksjonen ble avbrutt med «Not enough horizontal space».
+        # Et månedshull gir minst to varsellinjer.
+        df = comparison_df.copy()
+        df.loc[df["Month"] == 3, "2025"] = 100.0
+        df.loc[df["Month"] == 4, "2025"] = 9000.0
+        with caplog.at_level("WARNING", logger=pdf_mod.logger.name):
+            pdf_mod.build_pdf_report(
+                df,
+                point="Ryfast (sum tunneler)",
+                comparison_mode=COMPARE_YEARS,
+                year_list=[2024, 2025],
+                year=2025,
+                point_ids=["punkt_a", "punkt_b"],
+                timeout_s=5,
+                use_cache=False,
+                coverage_threshold=50.0,
+                ryfast_include_ramp=True,
+            )
+        assert "varselseksjon" not in caplog.text
+
     def test_tunneldekning_har_maanedsnavn(self, comparison_df, monkeypatch):
         # Regresjon: itertuples() omdøper "Month Name" til "_1", så linjene ble
         # skrevet som ": Ryfylke 99.0% ..." uten måned.
